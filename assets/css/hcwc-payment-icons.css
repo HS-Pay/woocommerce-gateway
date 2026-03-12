@@ -1,29 +1,29 @@
-/* VisioFex Payment Gateway Card Icons */
-.visiofex-title-wrapper {
+/* Hosted Checkout Card Icons */
+.hcwc-title-wrapper {
     display: inline-flex;
     align-items: center;
     gap: 8px;
 }
 
-.visiofex-payment-title {
+.hcwc-payment-title {
     font-weight: 500;
 }
 
-.visiofex-card-icons {
+.hcwc-card-icons {
     display: inline-flex;
     align-items: center;
     gap: 6px;
     opacity: 1;
 }
 
-.visiofex-card-icon {
+.hcwc-card-icon {
     height: 32px;
     width: auto;
     max-height: 32px;
     object-fit: contain;
 }
 
-.visiofex-card-icon svg {
+.hcwc-card-icon svg {
     display: block;
     height: 100%;
     width: auto;
@@ -31,11 +31,11 @@
 
 /* Responsive adjustments */
 @media (max-width: 768px) {
-    .visiofex-title-wrapper {
+    .hcwc-title-wrapper {
         gap: 6px;
     }
     
-    .visiofex-card-icon {
+    .hcwc-card-icon {
         height: 28px;
         max-height: 28px;
     }

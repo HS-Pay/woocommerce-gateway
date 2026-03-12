@@ -8,55 +8,84 @@ add_action( 'before_woocommerce_init', function() {
 } );
 /**
  * QUICK CONFIG (defaults shown in the Settings page)
- * If you prefer not to hardcode anything, leave these blank and configure in WooCommerce > Settings > Payments > VisioFex Pay.
+ * If you prefer not to hardcode anything, leave these blank and configure in WooCommerce > Settings > Payments.
  */
-define('VXF_DEFAULT_TESTMODE', true);
-define('VXF_DEFAULT_SECRET_KEY', '');
-define('VXF_DEFAULT_VENDOR_ID', '');
+define('KC_BRAND_NAME_FALLBACK', 'Payment Gateway');
+define('KC_DEFAULT_SECRET_KEY', '');
+define('KC_DEFAULT_VENDOR_ID', '');
 /** Your store's public base URL (used to prefill success/return/cancel). */
-define('VXF_DEFAULT_STORE_DOMAIN', 'https://yourdomain.com');
-// Deprecated settings removed: public key, webhook secret, API base override, checkout mode
+define('KC_DEFAULT_STORE_DOMAIN', 'https://yourdomain.com');
+
+if ( ! function_exists( 'kc_get_brand_name' ) ) {
+    function kc_get_brand_name() {
+        $cached = get_option( 'kc_brand_cache', array() );
+        return ! empty( $cached['name'] ) ? $cached['name'] : KC_BRAND_NAME_FALLBACK;
+    }
+}
+if ( ! function_exists( 'kc_get_brand_logo' ) ) {
+    function kc_get_brand_logo() {
+        $cached = get_option( 'kc_brand_cache', array() );
+        return ! empty( $cached['logo'] ) ? $cached['logo'] : '';
+    }
+}
+if ( ! function_exists( 'kc_get_api_domain' ) ) {
+    function kc_get_api_domain() {
+        $settings = get_option( 'woocommerce_hcwc_settings', array() );
+        $domain = ! empty( $settings['api_domain'] ) ? $settings['api_domain'] : 'clickbrickco.com';
+        if ( strpos( $domain, ':' ) !== false || strpos( $domain, 'localhost' ) === 0 || strpos( $domain, 'host.docker.internal' ) === 0 ) {
+            return $domain;
+        }
+        return 'api.' . $domain;
+    }
+}
+if ( ! function_exists( 'kc_get_api_url' ) ) {
+    function kc_get_api_url() {
+        $host = kc_get_api_domain();
+        $scheme = ( strpos( $host, 'localhost' ) === 0 || strpos( $host, 'host.docker.internal' ) === 0 ) ? 'http' : 'https';
+        return $scheme . '://' . $host . '/v1';
+    }
+}
 
 /**
- * Plugin Name: VisioFex for WooCommerce
- * Plugin URI:  https://example.com/visiofex-woocommerce
- * Description: VisioFex/KonaCash hosted checkout for WooCommerce with refunds, Blocks support, and easy settings for keys, vendor id, and URLs.
+ * Plugin Name: Hosted Checkout for WooCommerce
+ * Plugin URI:  https://github.com/hsfs/woocommerce-gateway
+ * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      NexaFlow Payments
  * Author URI:  https://nexaflowpayments.com
- * Version:     1.5.6
+ * Version:     1.6.0
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
  * WC tested up to: 9.2
  * License:     MIT
- * Text Domain: visiofex-woocommerce
+ * Text Domain: hcwc
  */
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'VXF_WC_VERSION', '1.5.6' );
-define( 'VXF_WC_PLUGIN_FILE', __FILE__ );
-define( 'VXF_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
-define( 'VXF_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
+define( 'KC_WC_VERSION', '1.6.0' );
+define( 'KC_WC_PLUGIN_FILE', __FILE__ );
+define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
+define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 
 /**
  * Initialize Plugin Update Checker for auto-updates from GitHub
  */
-require_once VXF_WC_PLUGIN_DIR . 'vendor/plugin-update-checker/plugin-update-checker.php';
+require_once KC_WC_PLUGIN_DIR . 'vendor/plugin-update-checker/plugin-update-checker.php';
 use YahnisElsts\PluginUpdateChecker\v5\PucFactory;
 
-$vxf_update_checker = PucFactory::buildUpdateChecker(
-    'https://github.com/chiznitz/visiofex-woocommerce-gateway/',
+$kc_update_checker = PucFactory::buildUpdateChecker(
+    'https://github.com/hsfs/woocommerce-gateway/',
     __FILE__,
-    'visiofex-woocommerce-gateway'
+    'hosted-checkout-gateway'
 );
-$vxf_update_checker->setBranch('master');
+$kc_update_checker->setBranch('master');
 
 // Use the main checker for backward compatibility, but both branches will be checked
 // WordPress will show updates from whichever branch has the newer version
 
 // Optional: Set authentication for private repos (not needed for public repos)
-// $vxf_update_checker->setAuthentication('your-token-here');
+// $kc_update_checker->setAuthentication('your-token-here');
 
 /**
  * Make sure WooCommerce is active.
@@ -64,7 +93,7 @@ $vxf_update_checker->setBranch('master');
 add_action( 'plugins_loaded', function() {
     if ( ! class_exists( 'WooCommerce' ) || ! class_exists( 'WC_Payment_Gateway' ) ) {
         add_action( 'admin_notices', function() {
-            echo '<div class="notice notice-error"><p><strong>VisioFex for WooCommerce</strong> requires WooCommerce to be active.</p></div>';
+            echo '<div class="notice notice-error"><p><strong>' . esc_html( kc_get_brand_name() ) . ' for WooCommerce</strong> requires WooCommerce to be active.</p></div>';
         } );
         return;
     }
@@ -73,32 +102,32 @@ add_action( 'plugins_loaded', function() {
      * Register gateway.
      */
     add_filter( 'woocommerce_payment_gateways', function( $gateways ) {
-        $gateways[] = 'WC_Gateway_VisioFex';
+        $gateways[] = 'WC_Gateway_HCWC';
         return $gateways;
     } );
 
     /**
      * Gateway class.
      */
-    class WC_Gateway_VisioFex extends WC_Payment_Gateway {
+    class WC_Gateway_HCWC extends WC_Payment_Gateway {
         // Declare properties to fix PHP 8.2+ deprecation warnings
-        public $testmode;
         public $secret_key;
         public $vendor_id;
         public $store_domain;
         public $api_base;
         public $mode;
+        public $payment_type;
         public $logging;
-    // Removed $show_logo (logo toggle no longer supported)
 
         public function __construct() {
-            $this->id                 = 'visiofex';
+            $this->id                 = 'hcwc';
             // Keep basic icon for settings page, we'll enhance the checkout display with get_icon()
-            $this->icon = VXF_WC_PLUGIN_URL . 'assets/visiofex-logo.png';
+            $brand_logo = kc_get_brand_logo();
+            $this->icon = $brand_logo ? $brand_logo : '';
             // No on-page fields; we redirect to hosted checkout
             $this->has_fields = false;
-            $this->method_title       = __( 'VisioFex', 'visiofex-woocommerce' );
-            $this->method_description = __( 'VisioFex hosted checkout. Accept major cards plus Cash App Pay, and Amazon Pay.', 'visiofex-woocommerce' );
+            $this->method_title       = kc_get_brand_name();
+            $this->method_description = kc_get_brand_name() . ' hosted checkout. Accept eCheck/ACH bank transfers.';
             $this->supports           = array( 'products', 'refunds' );
 
             $this->init_form_fields();
@@ -106,23 +135,32 @@ add_action( 'plugins_loaded', function() {
 
             // Settings values with top-of-file defaults as fallback
             $this->enabled        = $this->get_option( 'enabled', 'no' );
-            // Use new user‑facing defaults (stored option may override)
-            $this->title          = $this->get_option( 'title', __( 'Pay by Credit or Debit Card', 'visiofex-woocommerce' ) );
-            $this->description    = $this->get_option( 'description', __( 'Pay securely using your Visa, MasterCard, American Express or Discover. This method also allows Cash App and Pay with Amazon. After payment you will be redirected back to our website and your order will ship out right away.', 'visiofex-woocommerce' ) );
-            $this->testmode       = 'yes' === $this->get_option( 'testmode', VXF_DEFAULT_TESTMODE ? 'yes' : 'no' );
-            $this->secret_key     = $this->get_option( 'secret_key', VXF_DEFAULT_SECRET_KEY );
-            $this->vendor_id      = $this->get_option( 'vendor_id', VXF_DEFAULT_VENDOR_ID );
+            $this->payment_type   = $this->get_option( 'payment_type', 'echeck' );
+
+            // Dynamic defaults based on payment type
+            if ( $this->payment_type === 'echeck' ) {
+                $default_title = __( 'Pay by Bank Transfer', 'hcwc' );
+                $default_desc  = __( 'Pay securely via bank account (ACH/eCheck). After payment you will be redirected back to our website.', 'hcwc' );
+            } else {
+                $default_title = __( 'Pay by Credit or Debit Card', 'hcwc' );
+                $default_desc  = __( 'Pay securely using your Visa, MasterCard, American Express or Discover. After payment you will be redirected back to our website and your order will ship out right away.', 'hcwc' );
+            }
+            $this->title          = $this->get_option( 'title', $default_title );
+            $this->description    = $this->get_option( 'description', $default_desc );
+            $this->secret_key     = $this->get_option( 'secret_key', KC_DEFAULT_SECRET_KEY );
+            $this->vendor_id      = $this->get_option( 'vendor_id', KC_DEFAULT_VENDOR_ID );
             $this->store_domain   = rtrim( $this->get_option( 'store_domain', untrailingslashit( home_url() ) ), '/' );
             $this->api_base       = '';
             $this->mode           = 'payment';
-            $this->logging        = 'yes' === $this->get_option( 'logging', 'yes' );
+            $this->logging        = 'yes' === $this->get_option( 'logging', 'no' );
             // Logo toggle deprecated; always text + optional card icons
 
             add_action( 'woocommerce_update_options_payment_gateways_' . $this->id, array( $this, 'process_admin_options' ) );
+            add_action( 'woocommerce_update_options_payment_gateways_' . $this->id, array( $this, 'fetch_brand_info' ), 20 );
 
             // Webhook endpoint disabled for simplified setup
-            // add_action( 'woocommerce_api_wc_gateway_visiofex', array( $this, 'handle_webhook' ) );
-            add_action( 'woocommerce_thankyou_' . $this->id, array( $this, 'vxf_capture_transaction_on_return' ), 10, 1 );
+            // add_action( 'woocommerce_api_wc_gateway_hcwc', array( $this, 'handle_webhook' ) );
+            add_action( 'woocommerce_thankyou_' . $this->id, array( $this, 'kc_capture_transaction_on_return' ), 10, 1 );
 
             // Enqueue our custom CSS for enhanced payment icons
             add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_payment_icons_css' ) );
@@ -137,10 +175,10 @@ add_action( 'plugins_loaded', function() {
         public function enqueue_payment_icons_css() {
             if ( is_checkout() ) {
                 wp_enqueue_style( 
-                    'visiofex-payment-icons', 
-                    VXF_WC_PLUGIN_URL . 'assets/css/visiofex-payment-icons.css', 
+                    'hcwc-payment-icons', 
+                    KC_WC_PLUGIN_URL . 'assets/css/hcwc-payment-icons.css', 
                     array(), 
-                    VXF_WC_VERSION 
+                    KC_WC_VERSION 
                 );
             }
         }
@@ -148,30 +186,33 @@ add_action( 'plugins_loaded', function() {
         public function get_title() {
             // Only show custom title on the checkout page. Elsewhere, return simple identifier.
             if ( function_exists( 'is_checkout' ) && is_checkout() ) {
-                $custom_title = $this->get_option( 'title', __( 'Pay by Credit or Debit Card', 'visiofex-woocommerce' ) );
+                $custom_title = $this->get_option( 'title', __( 'Pay by Bank Transfer', 'hcwc' ) );
                 return apply_filters( 'woocommerce_gateway_title', esc_html( $custom_title ), $this->id );
             }
             // Non-checkout contexts (admin, order pages, emails): simple identifier
-            return apply_filters( 'woocommerce_gateway_title', 'visiofex', $this->id );
+            return apply_filters( 'woocommerce_gateway_title', strtolower( kc_get_brand_name() ), $this->id );
         }
 
         /**
          * Override method title to ensure consistent display
          */
         public function get_method_title() {
-            // Always return simple "VisioFex" - we don't want "VisioFex Pay" showing anywhere
-            return __( 'VisioFex', 'visiofex-woocommerce' );
+            return kc_get_brand_name();
         }
 
         /**
          * Override the icon display to show just the card brands, as the logo is now in the title.
          */
         public function get_icon() {
-            $icon_html  = '<span class="visiofex-card-icons">';
-            $icon_html .= '<img class="visiofex-card-icon" src="' . esc_url( VXF_WC_PLUGIN_URL . 'assets/images/visa.svg' ) . '" alt="Visa" />';
-            $icon_html .= '<img class="visiofex-card-icon" src="' . esc_url( VXF_WC_PLUGIN_URL . 'assets/images/mastercard.svg' ) . '" alt="Mastercard" />';
-            $icon_html .= '<img class="visiofex-card-icon" src="' . esc_url( VXF_WC_PLUGIN_URL . 'assets/images/amex.svg' ) . '" alt="American Express" />';
-            $icon_html .= '<img class="visiofex-card-icon" src="' . esc_url( VXF_WC_PLUGIN_URL . 'assets/images/discover.svg' ) . '" alt="Discover" />';
+            $icon_html = '<span class="hcwc-card-icons">';
+            if ( $this->payment_type === 'card' ) {
+                $icon_html .= '<img class="hcwc-card-icon" src="' . esc_url( KC_WC_PLUGIN_URL . 'assets/images/visa.svg' ) . '" alt="Visa" />';
+                $icon_html .= '<img class="hcwc-card-icon" src="' . esc_url( KC_WC_PLUGIN_URL . 'assets/images/mastercard.svg' ) . '" alt="Mastercard" />';
+                $icon_html .= '<img class="hcwc-card-icon" src="' . esc_url( KC_WC_PLUGIN_URL . 'assets/images/amex.svg' ) . '" alt="American Express" />';
+                $icon_html .= '<img class="hcwc-card-icon" src="' . esc_url( KC_WC_PLUGIN_URL . 'assets/images/discover.svg' ) . '" alt="Discover" />';
+            } else {
+                $icon_html .= '<img class="hcwc-card-icon" src="' . esc_url( KC_WC_PLUGIN_URL . 'assets/images/bank.svg' ) . '" alt="Bank Transfer" />';
+            }
             $icon_html .= '</span>';
             return apply_filters( 'woocommerce_gateway_icon', $icon_html, $this->id );
         }
@@ -179,53 +220,64 @@ add_action( 'plugins_loaded', function() {
         public function init_form_fields() {
             $this->form_fields = array(
                 'enabled' => array(
-                    'title'   => __( 'Enable/Disable', 'visiofex-woocommerce' ),
+                    'title'   => __( 'Enable/Disable', 'hcwc' ),
                     'type'    => 'checkbox',
-                    'label'   => __( 'Enable VisioFex Pay', 'visiofex-woocommerce' ),
+                    'label'   => 'Enable ' . kc_get_brand_name() . ' Pay',
                     'default' => 'no',
                 ),
+                'payment_type' => array(
+                    'title'       => __( 'Payment Type', 'hcwc' ),
+                    'type'        => 'select',
+                    'description' => __( 'Select the payment method type offered on the hosted checkout page.', 'hcwc' ),
+                    'default'     => 'echeck',
+                    'options'     => array(
+                        'echeck' => __( 'eCheck / Bank Transfer (ACH)', 'hcwc' ),
+                    ),
+                ),
                 'title' => array(
-                    'title'       => __( 'Title', 'visiofex-woocommerce' ),
+                    'title'       => __( 'Title', 'hcwc' ),
                     'type'        => 'text',
-                    'default'     => __( 'Pay by Credit or Debit Card', 'visiofex-woocommerce' ),
+                    'default'     => __( 'Pay by Bank Transfer', 'hcwc' ),
+                    'description' => __( 'Leave blank to use the default based on Payment Type.', 'hcwc' ),
                     'desc_tip'    => true,
                 ),
                 'description' => array(
-                    'title'       => __( 'Description', 'visiofex-woocommerce' ),
+                    'title'       => __( 'Description', 'hcwc' ),
                     'type'        => 'textarea',
-                    'default'     => __( 'Pay securely using your Visa, MasterCard, American Express or Discover. This method also allows Cash App and Pay with Amazon. After payment you will be redirected back to our website and your order will ship out right away.', 'visiofex-woocommerce' ),
-                    'description' => __( 'This text will be displayed to customers during checkout.', 'visiofex-woocommerce' ),
-                ),
-                'testmode' => array(
-                    'title'       => __( 'Test mode', 'visiofex-woocommerce' ),
-                    'type'        => 'checkbox',
-                    'label'       => __( 'Enable test (sandbox) mode', 'visiofex-woocommerce' ),
-                    'default'     => VXF_DEFAULT_TESTMODE ? 'yes' : 'no',
+                    'default'     => __( 'Pay securely via bank account (ACH/eCheck). After payment you will be redirected back to our website.', 'hcwc' ),
+                    'description' => __( 'This text will be displayed to customers during checkout. Leave blank to use the default based on Payment Type.', 'hcwc' ),
                 ),
                 'secret_key' => array(
-                    'title'       => __( 'Secret Key', 'visiofex-woocommerce' ),
+                    'title'       => __( 'Secret Key', 'hcwc' ),
                     'type'        => 'password',
-                    'default'     => VXF_DEFAULT_SECRET_KEY,
+                    'default'     => KC_DEFAULT_SECRET_KEY,
                 ),
                 'vendor_id' => array(
-                    'title'       => __( 'Vendor ID', 'visiofex-woocommerce' ),
+                    'title'       => __( 'Vendor ID', 'hcwc' ),
                     'type'        => 'text',
-                    'default'     => VXF_DEFAULT_VENDOR_ID,
-                    'description' => __( 'Provided by VisioFex/KonaCash.', 'visiofex-woocommerce' ),
+                    'default'     => KC_DEFAULT_VENDOR_ID,
+                    'description' => 'Provided by ' . kc_get_brand_name() . '.',
+                ),
+                'api_domain' => array(
+                    'title'       => __( 'API Domain', 'hcwc' ),
+                    'type'        => 'text',
+                    'default'     => 'clickbrickco.com',
+                    'description' => __( 'The payment platform domain. Brand info and API URLs are derived from this.', 'hcwc' ),
+                    'placeholder' => 'clickbrickco.com',
                 ),
                 'store_domain' => array(
-                    'title'       => __( 'Your Store Domain', 'visiofex-woocommerce' ),
+                    'title'       => __( 'Your Store Domain', 'hcwc' ),
                     'type'        => 'text',
                     'default'     => untrailingslashit( home_url() ),
-                    'description' => __( 'Auto-detected from your site. Used for success/return/cancel URLs.', 'visiofex-woocommerce' ),
+                    'description' => __( 'Auto-detected from your site. Used for success/return/cancel URLs.', 'hcwc' ),
                     'placeholder' => untrailingslashit( home_url() ),
                 ),
                 // Removed show_logo setting (logo deprecated)
                 'logging' => array(
-                    'title'       => __( 'Debug log', 'visiofex-woocommerce' ),
+                    'title'       => __( 'Debug log', 'hcwc' ),
                     'type'        => 'checkbox',
-                    'label'       => __( 'Enable logging (WooCommerce > Status > Logs)', 'visiofex-woocommerce' ),
-                    'default'     => 'yes',
+                    'label'       => __( 'Enable logging (WooCommerce > Status > Logs)', 'hcwc' ),
+                    'default'     => 'no',
                 ),
             );
         }
@@ -274,13 +326,37 @@ add_action( 'plugins_loaded', function() {
 
         protected function get_api_base() {
             if ( ! empty( $this->api_base ) ) return untrailingslashit( $this->api_base );
-            return $this->testmode ? 'https://api.konacash.com/v1' : 'https://api.konacash.com/v1'; // adjust if live differs
+            return kc_get_api_url();
         }
 
-        // Change signature
+        public function fetch_brand_info() {
+            $this->init_settings();
+            $key = $this->get_option( 'secret_key' );
+            if ( empty( $key ) ) return;
+
+            $url = kc_get_api_url() . '/checkout/brand';
+
+            $resp = wp_remote_get( $url, array(
+                'headers' => array( 'X-API-KEY' => $key ),
+                'timeout' => 10,
+            ) );
+            if ( is_wp_error( $resp ) ) return;
+
+            $body = json_decode( wp_remote_retrieve_body( $resp ), true );
+            if ( empty( $body['data'] ) ) return;
+
+            $brand_data = array(
+                'brand' => sanitize_text_field( $body['data']['brand'] ?? '' ),
+                'name'  => sanitize_text_field( $body['data']['name'] ?? '' ),
+                'logo'  => esc_url_raw( $body['data']['logo'] ?? '' ),
+            );
+            update_option( 'kc_brand_cache', $brand_data );
+            $this->log( 'Brand info fetched: ' . wp_json_encode( $brand_data ) );
+        }
+
         protected function request( $method, $path, $body = null, $idempotency_key = null ) {
             // Basic rate limiting check
-            $rate_limit_key = 'visiofex_api_requests_' . md5( $this->secret_key );
+            $rate_limit_key = 'hcwc_api_requests_' . md5( $this->secret_key );
             $current_count = get_transient( $rate_limit_key );
             if ( $current_count === false ) {
                 set_transient( $rate_limit_key, 1, 60 ); // 1 minute window
@@ -298,7 +374,7 @@ add_action( 'plugins_loaded', function() {
             $headers = array(
                 'Content-Type' => 'application/json',
                 'X-API-KEY'    => $this->secret_key,
-                'User-Agent'   => 'VisioFex-WooCommerce/' . VXF_WC_VERSION,
+                'User-Agent'   => kc_get_brand_name() . '-WooCommerce/' . KC_WC_VERSION,
             );
             if ( $idempotency_key && in_array( strtoupper( $method ), array('POST','PUT','PATCH','DELETE'), true ) ) {
                 $headers['Idempotency-Key'] = $idempotency_key;
@@ -374,7 +450,7 @@ add_action( 'plugins_loaded', function() {
             return wp_json_encode( $structure );
         }
 
-        public function vxf_capture_transaction_on_return( $order_id ) {
+        public function kc_capture_transaction_on_return( $order_id ) {
             // Input validation
             if ( ! is_numeric( $order_id ) || $order_id <= 0 ) {
                 $this->log( 'Transaction capture failed: Invalid order ID format', 'error' );
@@ -396,7 +472,7 @@ add_action( 'plugins_loaded', function() {
             $this->log( 'Order found - Status: ' . $order->get_status() . ', Total: ' . $order->get_total() );
 
             // Ensure we have the session id (meta or ?sessionID= on the return URL)
-            $session_id = $order->get_meta( '_visiofex_session_id' );
+            $session_id = $order->get_meta( '_hcwc_session_id' );
             if ( ! $session_id && isset( $_GET['sessionID'] ) ) {
                 $session_id = sanitize_text_field( wp_unslash( $_GET['sessionID'] ) );
                 // Validate session ID format (basic check for expected format)
@@ -407,23 +483,25 @@ add_action( 'plugins_loaded', function() {
                 // Check if this session ID is already used by another order
                 if ( $this->is_session_id_used_by_another_order( $session_id, $order->get_id() ) ) {
                     $this->log( 'Session ID from URL already used by another order: ' . $session_id, 'error' );
-                    $order->add_order_note( 'VisioFex: Session ID conflict detected. Please contact support.' );
+                    $order->add_order_note( kc_get_brand_name() . ': Session ID conflict detected. Please contact support.' );
                     return;
                 }
-                $order->update_meta_data( '_visiofex_session_id', $session_id );
+                $order->update_meta_data( '_hcwc_session_id', $session_id );
                 $this->log( 'Session ID obtained from URL parameter: ' . $session_id );
             }
             
             if ( ! $session_id ) { 
                 $this->log( 'Transaction capture failed: Missing session ID', 'error' );
-                $order->add_order_note( 'VisioFex: missing session id on return.' ); 
+                $order->add_order_note( kc_get_brand_name() . ': missing session id on return.' ); 
                 return; 
             }
 
             $this->log( 'Starting polling for session: ' . $session_id );
 
-            // Short polling: immediate → 0.5s → 1.5s → 3s (stop as soon as it’s paid)
-            foreach ( array(0, 0.5, 1.5, 3.0) as $attempt => $delay ) {
+            $poll_delays = ( $this->payment_type === 'echeck' )
+                ? array( 0, 1.0, 2.0, 3.0, 4.0, 5.0 )
+                : array( 0, 0.5, 1.5, 3.0 );
+            foreach ( $poll_delays as $attempt => $delay ) {
                 if ( $delay ) { 
                     usleep( (int) ( $delay * 1e6 ) );
                     $this->log( 'Polling attempt ' . ($attempt + 1) . ' after ' . $delay . 's delay' );
@@ -445,15 +523,15 @@ add_action( 'plugins_loaded', function() {
                 $this->log( 'Polling result - Status: ' . ( $status ?: 'none' ) . ', Transaction ID: ' . ( $txn_id ?: 'none' ) . ', Amount: ' . ( $amount_i !== null ? $amount_i : 'none' ) );
 
                 if ( $txn_id ) {
-                    $order->update_meta_data( '_visiofex_payment_id', sanitize_text_field( $txn_id ) );
+                    $order->update_meta_data( '_hcwc_payment_id', sanitize_text_field( $txn_id ) );
                     if ( $last4 && preg_match( '/^\d{4}$/', $last4 ) ) {   
-                        $order->update_meta_data( '_visiofex_last4', sanitize_text_field( $last4 ) ); 
+                        $order->update_meta_data( '_hcwc_last4', sanitize_text_field( $last4 ) ); 
                     }
                     if ( $network && in_array( strtolower( $network ), array( 'visa', 'mastercard', 'amex', 'discover', 'jcb', 'diners' ), true ) ) { 
-                        $order->update_meta_data( '_visiofex_network', sanitize_text_field( $network ) ); 
+                        $order->update_meta_data( '_hcwc_network', sanitize_text_field( $network ) ); 
                     }
                     if ( ! is_null( $amount_i ) && is_numeric( $amount_i ) && $amount_i >= 0 ) { 
-                        $order->update_meta_data( '_visiofex_tx_amount', floatval( $amount_i ) ); 
+                        $order->update_meta_data( '_hcwc_tx_amount', floatval( $amount_i ) ); 
                     }
                     
                     $this->log( 'Transaction metadata updated - Payment ID: ' . $txn_id . ', Last4: ' . ( $last4 ?: 'none' ) . ', Network: ' . ( $network ?: 'none' ) );
@@ -462,14 +540,14 @@ add_action( 'plugins_loaded', function() {
                 if ( in_array( $status, array( 'paid', 'succeeded' ), true ) ) {
                     $this->log( 'Payment successful - Completing order' );
                     $order->payment_complete( $txn_id ?: '' );
-                    $order->add_order_note( 'VisioFex: paid (verified via session).' );
+                    $order->add_order_note( kc_get_brand_name() . ': paid (verified via session).' );
                     $order->save();
                     return;
                 } else if ( in_array( $status, array( 'failed', 'cancelled', 'expired' ), true ) ) {
                     $this->log( 'Payment failed with status: ' . $status, 'warning' );
-                    $order->add_order_note( 'VisioFex: payment ' . $status . ' (verified via session).' );
+                    $order->add_order_note( kc_get_brand_name() . ': payment ' . $status . ' (verified via session).' );
                     if ( $status === 'failed' ) {
-                        $order->update_status( 'failed', 'VisioFex payment failed.' );
+                        $order->update_status( 'failed', kc_get_brand_name() . ' payment failed.' );
                     }
                     $order->save();
                     return;
@@ -477,13 +555,13 @@ add_action( 'plugins_loaded', function() {
             }
 
             $this->log( 'Polling completed - Payment status still pending after 4 attempts', 'warning' );
-            $order->add_order_note( 'VisioFex: session not yet paid after return; order left pending.' );
+            $order->add_order_note( kc_get_brand_name() . ': session not yet paid after return; order left pending.' );
         }
 
-        /** Public: Sync a single order from VisioFex (session/transaction/refunds). */
-        public function sync_order_from_visiofex( WC_Order $order ): void {
+        /** Public: Sync a single order from the payment gateway (session/transaction/refunds). */
+        public function sync_order_from_gateway( WC_Order $order ): void {
             // Security validation for admin operations
-            if ( is_admin() && ! $this->validate_admin_operation( 'visiofex_sync' ) ) {
+            if ( is_admin() && ! $this->validate_admin_operation( 'hcwc_sync' ) ) {
                 $this->log( 'Sync operation blocked: Security validation failed', 'error' );
                 return;
             }
@@ -498,7 +576,7 @@ add_action( 'plugins_loaded', function() {
             $this->log( 'Order sync validated - Status: ' . $order->get_status() . ', Total: ' . $order->get_total() );
 
             // 1) Ensure we know the session id
-            $session_id = $order->get_meta('_visiofex_session_id');
+            $session_id = $order->get_meta('_hcwc_session_id');
             if ( ! $session_id && isset($_GET['sessionID']) ) {
                 $session_id = sanitize_text_field( wp_unslash($_GET['sessionID']) );
                 // Validate session ID format
@@ -509,10 +587,10 @@ add_action( 'plugins_loaded', function() {
                 // Check if this session ID is already used by another order
                 if ( $this->is_session_id_used_by_another_order( $session_id, $order->get_id() ) ) {
                     $this->log( 'Session ID from URL already used by another order: ' . $session_id, 'error' );
-                    $order->add_order_note( 'VisioFex: Session ID conflict detected. Please contact support.' );
+                    $order->add_order_note( kc_get_brand_name() . ': Session ID conflict detected. Please contact support.' );
                     return;
                 }
-                $order->update_meta_data('_visiofex_session_id', $session_id);
+                $order->update_meta_data('_hcwc_session_id', $session_id);
                 $this->log( 'Session ID obtained from URL parameter: ' . $session_id );
             }
 
@@ -534,14 +612,14 @@ add_action( 'plugins_loaded', function() {
             }
 
             // 3) If no tx yet, try by stored payment_id or by listing transaction directly
-            $txn_id = $order->get_meta('_visiofex_payment_id') ?: ($tx['_id'] ?? '');
-            $this->log( 'Transaction ID resolution - From order meta: ' . ( $order->get_meta('_visiofex_payment_id') ?: 'none' ) . ', From session: ' . ( $tx['_id'] ?? 'none' ) );
+            $txn_id = $order->get_meta('_hcwc_payment_id') ?: ($tx['_id'] ?? '');
+            $this->log( 'Transaction ID resolution - From order meta: ' . ( $order->get_meta('_hcwc_payment_id') ?: 'none' ) . ', From session: ' . ( $tx['_id'] ?? 'none' ) );
             if ( ! $txn_id && ! empty($session['paymentIntent']) ) {
                 // If your API uses paymentIntent as the canonical tx id (you showed it null earlier, so likely not)
                 $txn_id = $session['paymentIntent'];
             }
             if ( ! $txn_id && ! empty($session['_id ']) ) {
-                // Sometimes there’s a way to filter by session: /transactions?sessionId=/
+                // Sometimes there's a way to filter by session: /transactions?sessionId=/
                 $r2 = $this->request('GET', 'transactions?sessionId=' . rawurlencode($session['_id']));
                 $list = $r2['body']['data']['transactions'] ?? $r2['body']['data'] ?? array();
                 if ( is_array($list) && ! empty($list) && isset($list[0]['_id']) ) {
@@ -556,14 +634,14 @@ add_action( 'plugins_loaded', function() {
 
             // Save handy bits
             if ( $txn_id ) {
-                $order->update_meta_data('_visiofex_payment_id', sanitize_text_field($txn_id));
+                $order->update_meta_data('_hcwc_payment_id', sanitize_text_field($txn_id));
                 $this->log( 'Transaction ID saved to order meta: ' . $txn_id );
             }
             $status = strtolower( $session['paymentStatus'] ?? '' );
             if ( in_array($status, array('paid','succeeded'), true) && ! $order->has_status(array('processing','completed')) ) {
                 $this->log( 'Payment confirmed - Completing order with status: ' . $status );
                 $order->payment_complete( $txn_id ?: '' );
-                $order->add_order_note('VisioFex: synced → marked paid.');
+                $order->add_order_note(kc_get_brand_name() . ': synced → marked paid.');
             } else {
                 $this->log( 'Payment status: ' . ( $status ?: 'none' ) . ', Order status: ' . $order->get_status() );
             }
@@ -603,42 +681,38 @@ add_action( 'plugins_loaded', function() {
                 $created = wc_create_refund( array(
                     'order_id'       => $order->get_id(),
                     'amount'         => $delta,
-                    'reason'         => 'Synced from VisioFex',
+                    'reason'         => 'Synced from ' . kc_get_brand_name(),
                     'refund_payment' => false,      // do not call gateway again
                     'restock_items'  => true,       // or make this a setting
                 ) );
                 if ( is_wp_error($created) ) {
                     $this->log( 'Refund creation failed: ' . $created->get_error_message(), 'error' );
-                    $order->add_order_note('VisioFex: sync found ' . wc_price($delta) . ' refunded, but Woo refund creation failed.');
+                    $order->add_order_note(kc_get_brand_name() . ': sync found ' . wc_price($delta) . ' refunded, but Woo refund creation failed.');
                 } else {
                     $this->log( 'Refund created successfully: ' . wc_price( $delta ) );
-                    $order->add_order_note('VisioFex: synced refund ' . wc_price($delta) . '.');
+                    $order->add_order_note(kc_get_brand_name() . ': synced refund ' . wc_price($delta) . '.');
                 }
             } else if ( $delta < 0 ) {
                 $this->log( 'WC has more refunds than API - Delta: ' . $delta, 'warning' );
             }
 
-            $order->update_meta_data('_visiofex_last_synced_at', gmdate('c'));
+            $order->update_meta_data('_hcwc_last_synced_at', gmdate('c'));
             $order->save();
             $this->log( 'Order sync completed for order #' . $order->get_id() );
 }
         public function is_available() {
-            if ( 'yes' !== $this->enabled ) { 
-                return false; 
-            }
-            
-            if ( ! is_ssl() && ! $this->testmode ) { 
-                return false; 
-            }
-            
-            // Allow showing in test mode even if keys are empty (helps setup); in live require a key
-            if ( empty( $this->secret_key ) ) {
-                if ( $this->testmode ) { 
-                    return true; 
-                }
+            if ( 'yes' !== $this->enabled ) {
                 return false;
             }
-            
+
+            if ( ! is_ssl() ) {
+                return false;
+            }
+
+            if ( empty( $this->secret_key ) ) {
+                return false;
+            }
+
             return true;
         }
 
@@ -676,7 +750,7 @@ add_action( 'plugins_loaded', function() {
             // Input validation
             if ( ! is_numeric( $order_id ) || $order_id <= 0 ) {
                 $this->log( 'Payment failed: Invalid order ID format', 'error' );
-                wc_add_notice( __( 'Invalid order. Please try again.', 'visiofex-woocommerce' ), 'error' );
+                wc_add_notice( __( 'Invalid order. Please try again.', 'hcwc' ), 'error' );
                 return array( 'result' => 'fail' );
             }
             
@@ -685,26 +759,26 @@ add_action( 'plugins_loaded', function() {
             $order = wc_get_order( $order_id );
             if ( ! $order ) {
                 $this->log( 'Invalid order ID: ' . $order_id, 'error' );
-                wc_add_notice( __( 'Invalid order. Please try again.', 'visiofex-woocommerce' ), 'error' );
+                wc_add_notice( __( 'Invalid order. Please try again.', 'hcwc' ), 'error' );
                 return array( 'result' => 'fail' );
             }
 
             // ** THE FIX **: Immediately set the correct title before any other processing.
-            $order->set_payment_method_title( 'visiofex' );
+            $order->set_payment_method_title( strtolower( kc_get_brand_name() ) );
             $order->save();
 
             $this->log( 'Order found - Currency: ' . $order->get_currency() . ', Total: ' . $order->get_total() );
 
             // Validate gateway configuration
-            if ( empty( $this->secret_key ) && ! $this->testmode ) {
-                $this->log( 'Gateway misconfiguration: Secret key missing in live mode', 'error' );
-                wc_add_notice( __( 'Payment gateway is not properly configured.', 'visiofex-woocommerce' ), 'error' );
+            if ( empty( $this->secret_key ) ) {
+                $this->log( 'Gateway misconfiguration: Secret key missing', 'error' );
+                wc_add_notice( __( 'Payment gateway is not properly configured.', 'hcwc' ), 'error' );
                 return array( 'result' => 'fail' );
             }
 
             if ( empty( $this->vendor_id ) ) {
                 $this->log( 'Gateway misconfiguration: Vendor ID missing', 'error' );
-                wc_add_notice( __( 'Payment gateway is not properly configured.', 'visiofex-woocommerce' ), 'error' );
+                wc_add_notice( __( 'Payment gateway is not properly configured.', 'hcwc' ), 'error' );
                 return array( 'result' => 'fail' );
             }
 
@@ -723,12 +797,42 @@ add_action( 'plugins_loaded', function() {
 
             $this->log( 'Generated URLs - Success: ' . $success . ', Return: ' . $return . ', Cancel: ' . $cancel );
 
+            $customer_details = array();
+            $billing_email = $order->get_billing_email();
+            $billing_first = $order->get_billing_first_name();
+            $billing_last  = $order->get_billing_last_name();
+            if ( $billing_email && $billing_first && $billing_last ) {
+                $customer_details = array(
+                    'firstName' => $billing_first,
+                    'lastName'  => $billing_last,
+                    'email'     => $billing_email,
+                );
+                $billing_phone = $order->get_billing_phone();
+                if ( $billing_phone ) {
+                    $customer_details['phoneNumber'] = $billing_phone;
+                }
+                $billing_addr1 = $order->get_billing_address_1();
+                $billing_city  = $order->get_billing_city();
+                $billing_country = $order->get_billing_country();
+                $billing_zip   = $order->get_billing_postcode();
+                if ( $billing_addr1 && $billing_city && $billing_country && $billing_zip ) {
+                    $customer_details['billingAddress'] = array(
+                        'line1'   => $billing_addr1,
+                        'line2'   => $order->get_billing_address_2(),
+                        'city'    => $billing_city,
+                        'region'  => $order->get_billing_state(),
+                        'country' => $billing_country,
+                        'zipcode' => $billing_zip,
+                    );
+                }
+            }
+
             $payload = array(
                 'vendor'      => $this->vendor_id ?: null,
-                'env'         => ( $this->testmode ? 'test' : 'live' ),
+                'env'         => 'live',
                 'mode'        => $this->mode ?: 'payment',
                 'currency'    => strtolower( $order->get_currency() ),
-                'amount'      => number_format( $order_total, 2, '.', '' ), // Total amount after all discounts/additions
+                'amount'      => number_format( $order_total, 2, '.', '' ),
                 'lineItems'   => $line_items,
                 'successURL'  => $success,
                 'returnURL'   => $return,
@@ -741,10 +845,12 @@ add_action( 'plugins_loaded', function() {
                     'coupon_count'   => count( $order->get_coupons() ),
                     'has_shipping'   => count( $order->get_shipping_methods() ) > 0,
                 ),
-                // You can also send shipping/billing if required by your account
             );
+            if ( ! empty( $customer_details ) ) {
+                $payload['customerDetails'] = $customer_details;
+            }
 
-            $this->log( 'API payload prepared - Environment: ' . ( $this->testmode ? 'test' : 'live' ) . ', Amount: ' . $order_total . ', Items: ' . count( $line_items ) . ' (products: ' . count( $order->get_items() ) . ', coupons: ' . count( $order->get_coupons() ) . ')' );
+            $this->log( 'API payload prepared - Amount: ' . $order_total . ', Items: ' . count( $line_items ) . ' (products: ' . count( $order->get_items() ) . ', coupons: ' . count( $order->get_coupons() ) . ')' );
 
             // Idempotency key recommended
             add_filter( 'http_request_args', function( $args, $url ) {
@@ -773,13 +879,13 @@ add_action( 'plugins_loaded', function() {
                 // Check if this session ID is already used by another order (extra safety check)
                 if ( $session_id && $this->is_session_id_used_by_another_order( $session_id, $order->get_id() ) ) {
                     $this->log( 'Session ID from API already used by another order: ' . $session_id, 'error' );
-                    wc_add_notice( __( 'Payment gateway error. Please try again.', 'visiofex-woocommerce' ), 'error' );
+                    wc_add_notice( __( 'Payment gateway error. Please try again.', 'hcwc' ), 'error' );
                     return array( 'result' => 'fail' );
                 }
                 
-                $order->update_meta_data( '_visiofex_request_id', $request_id );
-                $order->update_meta_data( '_visiofex_session_id', $session_id );
-                $order->update_meta_data( '_visiofex_api_base', esc_url_raw( $this->get_api_base() ) );
+                $order->update_meta_data( '_hcwc_request_id', $request_id );
+                $order->update_meta_data( '_hcwc_session_id', $session_id );
+                $order->update_meta_data( '_hcwc_api_base', esc_url_raw( $this->get_api_base() ) );
                 $order->save();
 
                 $payment_url = esc_url_raw( $body['data']['paymentURL'] );
@@ -799,7 +905,7 @@ add_action( 'plugins_loaded', function() {
             );
             $this->log( 'Payment process failed - ' . wp_json_encode( $error_details ), 'error' );
 
-            wc_add_notice( __( 'Could not start VisioFex checkout. Please try again.', 'visiofex-woocommerce' ), 'error' );
+            wc_add_notice( 'Could not start ' . kc_get_brand_name() . ' checkout. Please try again.', 'error' );
             return array( 'result' => 'fail' );
         }
 
@@ -829,18 +935,18 @@ add_action( 'plugins_loaded', function() {
 
             $this->log( 'Order found - Payment method: ' . $order->get_payment_method() . ', Status: ' . $order->get_status() . ', Total: ' . $order->get_total() );
 
-            $payment_id = $order->get_meta( '_visiofex_payment_id' );
+            $payment_id = $order->get_meta( '_hcwc_payment_id' );
 
-            // Check if this order was paid with VisioFex
+            // Check if this order was paid with this gateway
             if ( $order->get_payment_method() !== $this->id ) {
-                $this->log( 'Refund validation failed: Order not paid with VisioFex (method: ' . $order->get_payment_method() . ')', 'error' );
-                return new WP_Error( 'invalid_payment_gateway', 'Order was not paid with VisioFex' );
+                $this->log( 'Refund validation failed: Order not paid with this gateway (method: ' . $order->get_payment_method() . ')', 'error' );
+                return new WP_Error( 'invalid_payment_gateway', 'Order was not paid with ' . kc_get_brand_name() );
             }
 
             // Check if gateway is properly configured
             if ( empty( $this->secret_key ) ) {
                 $this->log( 'Refund validation failed: Gateway not configured (missing secret key)', 'error' );
-                return new WP_Error( 'invalid_payment_gateway', 'VisioFex gateway is not properly configured' );
+                return new WP_Error( 'invalid_payment_gateway', kc_get_brand_name() . ' gateway is not properly configured' );
             }
 
             if ( empty( $payment_id ) ) {
@@ -875,7 +981,7 @@ add_action( 'plugins_loaded', function() {
                 if ( abs( $refund_amount - $already_refunded ) < 0.01 ) {
                     $this->log( 'Allowing refund retry for same amount - treating as API-only refund', 'info' );
                     // Skip WooCommerce validation since the refund record already exists
-                    // We'll just try to send it to VisioFex API
+                    // We'll just try to send it to the payment API
                 } else {
                     $this->log( 'Refund amount mismatch - requested: ' . $refund_amount . ', already refunded: ' . $already_refunded, 'error' );
                 }
@@ -903,7 +1009,7 @@ add_action( 'plugins_loaded', function() {
             }
 
             if ( $is_retry ) {
-                $this->log( 'Processing as refund retry - WooCommerce refund already exists, sending to VisioFex API only', 'info' );
+                $this->log( 'Processing as refund retry - WooCommerce refund already exists, sending to payment API only', 'info' );
             }
 
             // Validate payment ID format
@@ -931,11 +1037,11 @@ add_action( 'plugins_loaded', function() {
             $this->log( 'Refund API response - Code: ' . $code . ', Body length: ' . strlen( wp_json_encode( $body ) ) . ' chars' );
 
             if ( $code >= 200 && $code < 300 ) {
-                $this->log( 'Refund processed successfully via VisioFex API' );
+                $this->log( 'Refund processed successfully via payment API' );
                 if ( $is_retry ) {
-                    $order->add_order_note( sprintf( 'VisioFex refund retry successful: %s. API confirmed refund processing. Reason: %s', wc_price( $refund_amount ), $reason ) );
+                    $order->add_order_note( sprintf( '%s refund retry successful: %s. API confirmed refund processing. Reason: %s', kc_get_brand_name(), wc_price( $refund_amount ), $reason ) );
                 } else {
-                    $order->add_order_note( sprintf( 'VisioFex refund processed: %s. Reason: %s', wc_price( $refund_amount ), $reason ) );
+                    $order->add_order_note( sprintf( '%s refund processed: %s. Reason: %s', kc_get_brand_name(), wc_price( $refund_amount ), $reason ) );
                 }
                 return true;
             } else {
@@ -964,7 +1070,7 @@ add_action( 'plugins_loaded', function() {
                 }
 
                 $this->log( 'Refund error message: ' . $error_msg, 'error' );
-                $order->add_order_note( 'VisioFex refund failed: ' . $error_msg );
+                $order->add_order_note( kc_get_brand_name() . ' refund failed: ' . $error_msg );
                 
                 return new WP_Error( 'refund_failed', 'Refund failed: ' . $error_msg );
             }
@@ -975,7 +1081,7 @@ add_action( 'plugins_loaded', function() {
         /**
          * Validate sensitive operations with proper security checks
          */
-        private function validate_admin_operation( $action = 'visiofex_admin' ) {
+        private function validate_admin_operation( $action = 'hcwc_admin' ) {
             // Check if user has proper capabilities
             if ( ! current_user_can( 'manage_woocommerce' ) ) {
                 $this->log( 'Security: Unauthorized access attempt for ' . $action, 'warning' );
@@ -997,7 +1103,7 @@ add_action( 'plugins_loaded', function() {
             if ( ! $this->logging ) return;
             if ( function_exists( 'wc_get_logger' ) ) {
                 $logger = wc_get_logger();
-                $context['source'] = 'visiofex';
+                $context['source'] = 'hcwc';
                 $logger->log( $level, $msg, $context );
             }
         }
@@ -1048,7 +1154,7 @@ add_action( 'plugins_loaded', function() {
 
             $args = array(
                 'limit'        => 1,
-                'meta_key'     => '_visiofex_session_id',
+                'meta_key'     => '_hcwc_session_id',
                 'meta_value'   => $session_id,
                 'meta_compare' => '=',
                 'return'       => 'ids',
@@ -1064,13 +1170,12 @@ add_action( 'plugins_loaded', function() {
     }
 
     /**
-     * GLOBAL HOOK: Force VisioFex payment method title to be consistent
+     * GLOBAL HOOK: Force payment method title to be consistent
      * This runs at a high priority to override any other title formatting
      */
     add_filter( 'woocommerce_order_get_payment_method_title', function( $title, $order ) {
-        if ( is_object( $order ) && method_exists( $order, 'get_payment_method' ) && $order->get_payment_method() === 'visiofex' ) {
-            // Force it to be lowercase 'visiofex' so WooCommerce formats it as "Payment via visiofex"
-            return 'visiofex';
+        if ( is_object( $order ) && method_exists( $order, 'get_payment_method' ) && $order->get_payment_method() === 'hcwc' ) {
+            return strtolower( kc_get_brand_name() );
         }
         return $title;
     }, 999, 2 ); // Very high priority
@@ -1079,9 +1184,9 @@ add_action( 'plugins_loaded', function() {
      * GLOBAL HOOK: Also override the order item totals display
      */
     add_filter( 'woocommerce_get_order_item_totals', function( $total_rows, $order ) {
-        if ( is_object( $order ) && method_exists( $order, 'get_payment_method' ) && $order->get_payment_method() === 'visiofex' ) {
+        if ( is_object( $order ) && method_exists( $order, 'get_payment_method' ) && $order->get_payment_method() === 'hcwc' ) {
             if ( isset( $total_rows['payment_method'] ) ) {
-                $total_rows['payment_method']['value'] = __( 'Payment via visiofex', 'visiofex-woocommerce' );
+                $total_rows['payment_method']['value'] = 'Payment via ' . strtolower( kc_get_brand_name() );
             }
         }
         return $total_rows;
@@ -1091,7 +1196,7 @@ add_action( 'plugins_loaded', function() {
      * Add Settings link on Plugins page.
      */
     add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), function( $links ) {
-        $url = admin_url( 'admin.php?page=wc-settings&tab=checkout&section=visiofex' );
+        $url = admin_url( 'admin.php?page=wc-settings&tab=checkout&section=hcwc' );
         $links[] = '<a href="' . esc_url( $url ) . '">Settings</a>';
         return $links;
     } );
@@ -1102,20 +1207,23 @@ add_action( 'plugins_loaded', function() {
     add_action( 'wp_enqueue_scripts', function() {
         if ( is_checkout() && ! is_wc_endpoint_url( 'order-received' ) ) {
             wp_enqueue_script(
-                'visiofex-redirect-fallback',
-                VXF_WC_PLUGIN_URL . 'assets/js/visiofex-redirect-fallback.js',
+                'hcwc-redirect-fallback',
+                KC_WC_PLUGIN_URL . 'assets/js/hcwc-redirect-fallback.js',
                 array(),
-                VXF_WC_VERSION,
+                KC_WC_VERSION,
                 true
             );
+            wp_localize_script( 'hcwc-redirect-fallback', 'kcGatewayData', array(
+                'brandName' => kc_get_brand_name(),
+            ) );
         }
     } );
 
     /** WooCommerce Blocks registration (simple; server-side processing handles the charge) */
     add_action( 'woocommerce_blocks_loaded', function() {
         // Static flag to prevent duplicate registration
-        static $vxf_blocks_registered = false;
-        if ( $vxf_blocks_registered ) {
+        static $kc_blocks_registered = false;
+        if ( $kc_blocks_registered ) {
             return;
         }
         
@@ -1123,87 +1231,106 @@ add_action( 'plugins_loaded', function() {
             return;
         }
         
-        require_once VXF_WC_PLUGIN_DIR . 'includes/class-wc-gateway-visiofex-blocks.php';
+        require_once KC_WC_PLUGIN_DIR . 'includes/class-wc-gateway-hcwc-blocks.php';
         add_action( 'woocommerce_blocks_payment_method_type_registration', function( \Automattic\WooCommerce\Blocks\Payments\PaymentMethodRegistry $registry ) {
             // Additional check to prevent duplicate registration
-            if ( $registry->is_registered( 'visiofex' ) ) {
+            if ( $registry->is_registered( 'hcwc' ) ) {
                 return;
             }
-            $blocks_instance = new WC_Gateway_VisioFex_Blocks();
+            $blocks_instance = new WC_Gateway_HCWC_Blocks();
             $registry->register( $blocks_instance );
         } );
         
-        $vxf_blocks_registered = true;
+        $kc_blocks_registered = true;
     } );
 
     // Fix payment method title when new orders are processed
     add_action( 'woocommerce_checkout_order_processed', function( $order_id ) {
         $order = wc_get_order( $order_id );
-        if ( $order && $order->get_payment_method() === 'visiofex' ) {
-            $order->set_payment_method_title( 'visiofex' );
+        if ( $order && $order->get_payment_method() === 'hcwc' ) {
+            $order->set_payment_method_title( strtolower( kc_get_brand_name() ) );
             $order->save();
         }
     }, 5 ); // Changed from 20 to 5 to run earlier
 
     // Additional hook: Fix title during order creation (even earlier)
     add_action( 'woocommerce_checkout_create_order', function( $order, $data ) {
-        if ( $order && isset( $data['payment_method'] ) && $data['payment_method'] === 'visiofex' ) {
-            $order->set_payment_method_title( 'visiofex' );
+        if ( $order && isset( $data['payment_method'] ) && $data['payment_method'] === 'hcwc' ) {
+            $order->set_payment_method_title( strtolower( kc_get_brand_name() ) );
         }
     }, 5, 2 );
 
-    // One-time fix for existing orders when plugin loads
-    add_action( 'init', function() {
-        // This could be implemented if needed for migration
-    } );
+    // One-time migration from legacy 'konacash' gateway ID to 'hcwc'
+    if ( ! get_option( 'hcwc_migrated_from_konacash' ) ) {
+        $old = get_option( 'woocommerce_konacash_settings', array() );
+        if ( ! empty( $old ) && empty( get_option( 'woocommerce_hcwc_settings', array() ) ) ) {
+            update_option( 'woocommerce_hcwc_settings', $old );
+        }
+        $old_hours = get_option( 'konacash_auto_sync_hours' );
+        if ( $old_hours !== false && get_option( 'hcwc_auto_sync_hours' ) === false ) {
+            update_option( 'hcwc_auto_sync_hours', $old_hours );
+        }
+        global $wpdb;
+        $wpdb->update( $wpdb->postmeta, array( 'meta_value' => 'hcwc' ), array( 'meta_key' => '_payment_method', 'meta_value' => 'konacash' ) );
+        if ( $wpdb->get_var( "SHOW TABLES LIKE '{$wpdb->prefix}wc_orders'" ) ) {
+            $wpdb->update( $wpdb->prefix . 'wc_orders', array( 'payment_method' => 'hcwc' ), array( 'payment_method' => 'konacash' ) );
+        }
+        update_option( 'hcwc_migrated_from_konacash', 1 );
+    }
 }, 1 );
 
 
 register_activation_hook( __FILE__, function() {
+    // Migrate settings from legacy plugin if upgrading
+    $old = get_option( 'woocommerce_konacash_settings', array() );
+    $existing_settings = get_option( 'woocommerce_hcwc_settings', array() );
+    if ( ! empty( $old ) && empty( $existing_settings ) ) {
+        $existing_settings = $old;
+        update_option( 'woocommerce_hcwc_settings', $existing_settings );
+    }
     // Set default store domain if not already set
-    $existing_settings = get_option( 'woocommerce_visiofex_settings', array() );
     if ( empty( $existing_settings['store_domain'] ) ) {
         $existing_settings['store_domain'] = untrailingslashit( home_url() );
-        update_option( 'woocommerce_visiofex_settings', $existing_settings );
+        update_option( 'woocommerce_hcwc_settings', $existing_settings );
     }
 } );
 register_deactivation_hook( __FILE__, function() {} );
 
-add_action( 'woocommerce_admin_order_data_after_order_details', 'vxf_admin_order_panel', 10, 1 );
+add_action( 'woocommerce_admin_order_data_after_order_details', 'kc_admin_order_panel', 10, 1 );
 
-if ( ! function_exists( 'vxf_admin_order_panel' ) ) {
-function vxf_admin_order_panel( $order ) {
+if ( ! function_exists( 'kc_admin_order_panel' ) ) {
+function kc_admin_order_panel( $order ) {
     if ( ! $order instanceof WC_Order ) {
         return;
     }
 
     // Always expose the gateway for your admin JS
-    echo '<input type="hidden" id="vxf_order_gateway" value="' . esc_attr( $order->get_payment_method() ) . '"/>';
+    echo '<input type="hidden" id="kc_order_gateway" value="' . esc_attr( $order->get_payment_method() ) . '"/>';
 
-    // Only show VisioFex specifics for VisioFex orders
-    if ( $order->get_payment_method() !== 'visiofex' ) {
+    // Only show gateway specifics for gateway orders
+    if ( $order->get_payment_method() !== 'hcwc' ) {
         return;
     }
 
-    $txn_id     = $order->get_meta('_visiofex_payment_id') ?: '—';
-    $session_id = $order->get_meta('_visiofex_session_id') ?: '—';
+    $txn_id     = $order->get_meta('_hcwc_payment_id') ?: '—';
+    $session_id = $order->get_meta('_hcwc_session_id') ?: '—';
 
-    echo '<p><strong>VisioFex Transaction:</strong> ' . esc_html( $txn_id ) . '</p>';
-    echo '<p><strong>VisioFex Session:</strong> ' . esc_html( $session_id ) . '</p>';
+    echo '<p><strong>' . esc_html( kc_get_brand_name() ) . ' Transaction:</strong> ' . esc_html( $txn_id ) . '</p>';
+    echo '<p><strong>' . esc_html( kc_get_brand_name() ) . ' Session:</strong> ' . esc_html( $session_id ) . '</p>';
     
-    // Add refund reason dropdown for VisioFex orders
+    // Add refund reason dropdown for gateway orders
     ?>
     <script>
     jQuery(function($){
-        if ($('#vxf_order_gateway').val() === 'visiofex') {
+        if ($('#kc_order_gateway').val() === 'hcwc') {
             
             function addRefundDropdown() {
                 var $ta = $('#refund_reason, textarea[name="refund_reason"]');
                 
-                if ($ta.length && !$('#vxf_refund_reason').length) {
-                    var $wrap = $('<p class="form-field vxf-refund-reason-field" style="margin: 10px 0;"></p>');
-                    var $label = $('<label for="vxf_refund_reason" style="font-weight: bold;">VisioFex refund reason</label>');
-                    var $sel = $('<select id="vxf_refund_reason" name="vxf_refund_reason" style="width: 100%; margin-top: 5px;"></select>');
+                if ($ta.length && !$('#kc_refund_reason').length) {
+                    var $wrap = $('<p class="form-field kc-refund-reason-field" style="margin: 10px 0;"></p>');
+                    var $label = $('<label for="kc_refund_reason" style="font-weight: bold;"><?php echo esc_js( kc_get_brand_name() ); ?> refund reason</label>');
+                    var $sel = $('<select id="kc_refund_reason" name="kc_refund_reason" style="width: 100%; margin-top: 5px;"></select>');
                     
                     $sel.append('<option value="requested_by_customer">Requested by customer</option>');
                     $sel.append('<option value="duplicate">Duplicate</option>');
@@ -1211,7 +1338,7 @@ function vxf_admin_order_panel( $order ) {
                     
                     $wrap.append($label).append('<br/>').append($sel);
                     $ta.after($wrap);
-                    $ta.prop('readonly', true).attr('placeholder', 'VisioFex requires a predefined reason; use the dropdown below.');
+                    $ta.prop('readonly', true).attr('placeholder', '<?php echo esc_js( kc_get_brand_name() ); ?> requires a predefined reason; use the dropdown below.');
                     
                     var sync = function(){ $ta.val($sel.val()); };
                     $sel.on('change', sync);
@@ -1222,7 +1349,7 @@ function vxf_admin_order_panel( $order ) {
                 }
             }
             
-            // Ensure refund amount field is always editable for VisioFex orders
+            // Ensure refund amount field is always editable for gateway orders
             function ensureRefundAmountEditable() {
                 $('#refund_amount, input[name="refund_amount"], .refund_amount').each(function() {
                     $(this).prop('readonly', false).prop('disabled', false);
@@ -1300,7 +1427,7 @@ function vxf_admin_order_panel( $order ) {
             
             // Periodic check with longer intervals to catch edge cases
             var checkInterval = setInterval(function() {
-                if ($('#refund_reason:visible, textarea[name="refund_reason"]:visible').length && !$('#vxf_refund_reason').length) {
+                if ($('#refund_reason:visible, textarea[name="refund_reason"]:visible').length && !$('#kc_refund_reason').length) {
                     addRefundDropdown();
                 }
                 ensureRefundAmountEditable();
@@ -1327,7 +1454,7 @@ add_action( 'admin_enqueue_scripts', function( $hook ) {
     if ( $hook === 'post.php' || $hook === 'post-new.php' ) {
         $screen = function_exists('get_current_screen') ? get_current_screen() : null;
         if ( $screen && $screen->post_type === 'shop_order' ) {
-            // Refund dropdown is now handled inline in vxf_admin_order_panel()
+            // Refund dropdown is now handled inline in kc_admin_order_panel()
             // No external JS file needed
         }
     }
@@ -1335,36 +1462,36 @@ add_action( 'admin_enqueue_scripts', function( $hook ) {
 
 // Add the action to the dropdown in Order actions
 add_filter('woocommerce_order_actions', function($actions){
-    $actions['vxf_sync_status'] = 'Sync VisioFex status';
+    $actions['kc_sync_status'] = 'Sync ' . kc_get_brand_name() . ' status';
     return $actions;
 });
 
 // Handle it: fetch gateway instance and call the method above
-add_action('woocommerce_order_action_vxf_sync_status', function($order){
+add_action('woocommerce_order_action_kc_sync_status', function($order){
     if ( ! $order instanceof WC_Order ) return;
     $pgs = wc()->payment_gateways()->payment_gateways();
-    if ( empty($pgs['visiofex']) ) { $order->add_order_note('VisioFex: gateway not available.'); return; }
-    /** @var WC_Gateway_VisioFex $gw */
-    $gw = $pgs['visiofex'];
-    $gw->sync_order_from_visiofex( $order );
+    if ( empty($pgs['hcwc']) ) { $order->add_order_note(kc_get_brand_name() . ': gateway not available.'); return; }
+    /** @var WC_Gateway_HCWC $gw */
+    $gw = $pgs['hcwc'];
+    $gw->sync_order_from_gateway( $order );
 });
 
-// After class WC_Gateway_VisioFex definition or near bottom of file add helper if not present
-if ( ! function_exists( 'visiofex_batch_auto_sync_orders' ) ) {
+// After class WC_Gateway_HCWC definition or near bottom of file add helper if not present
+if ( ! function_exists( 'hcwc_batch_auto_sync_orders' ) ) {
     /**
-     * Batch auto sync for VisioFex orders lacking a transaction id within configured window.
+     * Batch auto sync for gateway orders lacking a transaction id within configured window.
      * Runs silently on Orders list load. Uses transient lock to avoid repeated API hits.
      */
-    function visiofex_batch_auto_sync_orders() {
+    function hcwc_batch_auto_sync_orders() {
         // Debug logging to see if function is called at all
-        visiofex_log( 'Auto-sync: function called - checking conditions' );
+        hcwc_log( 'Auto-sync: function called - checking conditions' );
         
         if ( ! is_admin() ) {
-            visiofex_log( 'Auto-sync: not admin - exiting' );
+            hcwc_log( 'Auto-sync: not admin - exiting' );
             return;
         }
         if ( ! current_user_can( 'manage_woocommerce' ) ) {
-            visiofex_log( 'Auto-sync: user cannot manage woocommerce - exiting' );
+            hcwc_log( 'Auto-sync: user cannot manage woocommerce - exiting' );
             return;
         }
         
@@ -1377,16 +1504,16 @@ if ( ! function_exists( 'visiofex_batch_auto_sync_orders' ) ) {
         }
 
         // Check and log transient lock status
-        $lock_exists = get_transient( 'vxf_auto_sync_lock' );
+        $lock_exists = get_transient( 'kc_auto_sync_lock' );
         if ( $lock_exists ) {
-            visiofex_log( 'Auto-sync: locked (transient exists) - exiting' );
+            hcwc_log( 'Auto-sync: locked (transient exists) - exiting' );
             return;
         }
         
-        visiofex_log( 'Auto-sync: setting lock and proceeding' );
-        set_transient( 'vxf_auto_sync_lock', 1, 15 );
+        hcwc_log( 'Auto-sync: setting lock and proceeding' );
+        set_transient( 'kc_auto_sync_lock', 1, 15 );
 
-        $hours = (int) get_option( 'visiofex_auto_sync_hours', 24 );
+        $hours = (int) get_option( 'hcwc_auto_sync_hours', 24 );
         if ( $hours < 1 ) { $hours = 1; }
         if ( $hours > 48 ) { $hours = 48; }
         $cutoff_gmt = gmdate( 'Y-m-d H:i:s', time() - ( $hours * 3600 ) );
@@ -1394,7 +1521,7 @@ if ( ! function_exists( 'visiofex_batch_auto_sync_orders' ) ) {
         // $cutoff_gmt = gmdate( 'Y-m-d H:i:s', time() - ( $hours * 60 ) ); // Uses minutes instead of hours
 
         // Start log for visibility
-        visiofex_log( 'Auto-sync: scan start (window=' . $hours . 'h, cutoff=' . $cutoff_gmt . ')' );
+        hcwc_log( 'Auto-sync: scan start (window=' . $hours . 'h, cutoff=' . $cutoff_gmt . ')' );
 
         // Query recent pending/on-hold orders with session id but no transaction id
         $args = array(
@@ -1402,16 +1529,16 @@ if ( ! function_exists( 'visiofex_batch_auto_sync_orders' ) ) {
             'status'       => array( 'pending','on-hold' ),
             'orderby'      => 'date',
             'order'        => 'DESC',
-            'payment_method' => 'visiofex',
+            'payment_method' => 'hcwc',
             'date_created' => '>' . $cutoff_gmt,
             'return'       => 'objects',
         );
         
-        visiofex_log( 'Auto-sync: querying orders with args - ' . wp_json_encode( array_merge( $args, array( 'date_created' => 'cutoff_applied' ) ) ) );
+        hcwc_log( 'Auto-sync: querying orders with args - ' . wp_json_encode( array_merge( $args, array( 'date_created' => 'cutoff_applied' ) ) ) );
         
         $orders = wc_get_orders( $args );
         
-        visiofex_log( 'Auto-sync: found ' . ( is_array( $orders ) ? count( $orders ) : 0 ) . ' total orders matching criteria' );
+        hcwc_log( 'Auto-sync: found ' . ( is_array( $orders ) ? count( $orders ) : 0 ) . ' total orders matching criteria' );
         
         // Collect eligible orders (session id present, no transaction id yet)
         $eligible = array();
@@ -1420,15 +1547,15 @@ if ( ! function_exists( 'visiofex_batch_auto_sync_orders' ) ) {
             foreach ( $orders as $order ) {
                 $oid = $order->get_id();
                 // Use WooCommerce order methods for HPOS compatibility
-                $has_txn_id = $order->get_meta( '_visiofex_transaction_id' ) || $order->get_meta( '_visiofex_payment_id' );
-                $session_id = $order->get_meta( '_visiofex_session_id' );
+                $has_txn_id = $order->get_meta( '_hcwc_transaction_id' ) || $order->get_meta( '_hcwc_payment_id' );
+                $session_id = $order->get_meta( '_hcwc_session_id' );
                 
-                visiofex_log( 'Auto-sync: evaluating order #' . $oid . ' - has_txn_id: ' . ( $has_txn_id ? 'yes' : 'no' ) . ', session_id: ' . ( $session_id ? substr( $session_id, 0, 8 ) . '...' : 'none' ) );
+                hcwc_log( 'Auto-sync: evaluating order #' . $oid . ' - has_txn_id: ' . ( $has_txn_id ? 'yes' : 'no' ) . ', session_id: ' . ( $session_id ? substr( $session_id, 0, 8 ) . '...' : 'none' ) );
                 
                 if ( $has_txn_id ) { continue; }
                 if ( ! $session_id ) { continue; }
                 if ( in_array( $session_id, $used_sessions, true ) ) {
-                    visiofex_log( 'Auto-sync: skipping order #' . $oid . ' - session ' . $session_id . ' already processed for another order' );
+                    hcwc_log( 'Auto-sync: skipping order #' . $oid . ' - session ' . $session_id . ' already processed for another order' );
                     continue;
                 }
                 $eligible[] = array( 'order' => $order, 'session' => $session_id );
@@ -1437,7 +1564,7 @@ if ( ! function_exists( 'visiofex_batch_auto_sync_orders' ) ) {
         }
 
         if ( empty( $eligible ) ) {
-            visiofex_log( 'Auto-sync: no eligible pending sessions within last ' . $hours . 'h window.' );
+            hcwc_log( 'Auto-sync: no eligible pending sessions within last ' . $hours . 'h window.' );
             return;
         }
 
@@ -1447,30 +1574,31 @@ if ( ! function_exists( 'visiofex_batch_auto_sync_orders' ) ) {
             $log_list[] = '#' . $row['order']->get_id() . '(' . $row['session'] . ')';
             if ( count( $log_list ) >= 10 ) break; // limit verbosity
         }
-        visiofex_log( 'Auto-sync: found ' . count( $eligible ) . ' eligible order(s) (showing up to 10): ' . implode( ', ', $log_list ) . ' | window=' . $hours . 'h' );
+        hcwc_log( 'Auto-sync: found ' . count( $eligible ) . ' eligible order(s) (showing up to 10): ' . implode( ', ', $log_list ) . ' | window=' . $hours . 'h' );
 
         foreach ( $eligible as $row ) {
-            visiofex_auto_sync_single_order( $row['order'], $row['session'] );
+            hcwc_auto_sync_single_order( $row['order'], $row['session'] );
         }
     }
 }
 
-if ( ! function_exists( 'visiofex_auto_sync_single_order' ) ) {
+if ( ! function_exists( 'hcwc_auto_sync_single_order' ) ) {
     /**
      * Sync a single order by its session id (no transaction id yet).
      */
-    function visiofex_auto_sync_single_order( WC_Order $order, $session_id ) {
+    function hcwc_auto_sync_single_order( WC_Order $order, $session_id ) {
         // Retrieve secret key from gateway settings (matches process_payment usage)
-        $settings = get_option( 'woocommerce_visiofex_settings', array() );
+        $settings = get_option( 'woocommerce_hcwc_settings', array() );
         $api_key = isset( $settings['secret_key'] ) ? $settings['secret_key'] : '';
         if ( ! $api_key ) {
-            visiofex_log( 'Auto-sync: skipping order #' . $order->get_id() . ' (no secret key configured)' );
+            hcwc_log( 'Auto-sync: skipping order #' . $order->get_id() . ' (no secret key configured)' );
             return;
         }
 
-        visiofex_log( 'Auto-sync: checking order #' . $order->get_id() . ' session ' . $session_id );
+        hcwc_log( 'Auto-sync: checking order #' . $order->get_id() . ' session ' . $session_id );
 
-        $resp = wp_remote_get( "https://api.konacash.com/v1/checkout/sessions/$session_id", array(
+        $api_base = kc_get_api_url();
+        $resp = wp_remote_get( "{$api_base}/checkout/sessions/$session_id", array(
             'headers' => array( 'X-API-KEY' => $api_key ),
             'timeout' => 15,
         ) );
@@ -1485,41 +1613,41 @@ if ( ! function_exists( 'visiofex_auto_sync_single_order' ) ) {
         $status = strtolower( $sess['paymentStatus'] ?? '' );
         $txn_id = $txn['_id'] ?? '';
         
-        visiofex_log( 'Auto-sync: API response - Status: ' . ( $status ?: 'none' ) . ', Transaction ID: ' . ( $txn_id ?: 'none' ) );
+        hcwc_log( 'Auto-sync: API response - Status: ' . ( $status ?: 'none' ) . ', Transaction ID: ' . ( $txn_id ?: 'none' ) );
 
         if ( in_array( $status, array( 'paid','succeeded' ), true ) ) {
             if ( $txn_id ) {
-                $order->update_meta_data( '_visiofex_transaction_id', $txn_id );
-                $order->update_meta_data( '_visiofex_payment_id', $txn_id ); // Also save as payment_id for consistency
+                $order->update_meta_data( '_hcwc_transaction_id', $txn_id );
+                $order->update_meta_data( '_hcwc_payment_id', $txn_id ); // Also save as payment_id for consistency
                 $order->save();
                 
                 if ( ! $order->is_paid() ) {
                     $order->payment_complete( $txn_id );
                 }
-                visiofex_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' resolved to transaction ' . $txn_id . ' -> marked paid.' );
+                hcwc_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' resolved to transaction ' . $txn_id . ' -> marked paid.' );
             } else {
-                visiofex_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' shows paid status but no transaction ID - keeping pending until transaction appears.' );
+                hcwc_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' shows paid status but no transaction ID - keeping pending until transaction appears.' );
             }
         } elseif ( in_array( $status, array( 'failed','canceled' ), true ) ) {
             if ( ! $order->has_status( 'failed' ) ) {
-                $order->update_status( 'failed', 'VisioFex reported failure (auto sync)' );
+                $order->update_status( 'failed', kc_get_brand_name() . ' reported failure (auto sync)' );
             }
-            visiofex_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' status=' . $status . ' -> marked failed.' );
+            hcwc_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' status=' . $status . ' -> marked failed.' );
         } else {
-            visiofex_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' still pending (status=' . ( $status ?: 'none' ) . ').' );
+            hcwc_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' still pending (status=' . ( $status ?: 'none' ) . ').' );
         }
     }
 }
 
-add_action( 'current_screen', 'visiofex_batch_auto_sync_orders' );
+add_action( 'current_screen', 'hcwc_batch_auto_sync_orders' );
 
 // Add setting field for auto sync window hours inside gateway form_fields hook via filter if needed
-add_filter( 'woocommerce_settings_api_form_fields_visiofex', function( $fields ) {
+add_filter( 'woocommerce_settings_api_form_fields_hcwc', function( $fields ) {
     // Append new field
     $fields['auto_sync_hours'] = array(
-        'title'       => __( 'Auto Sync Window (hours)', 'visiofex-woocommerce' ),
+        'title'       => __( 'Auto Sync Window (hours)', 'hcwc' ),
         'type'        => 'number',
-        'description' => __( 'On Orders page load, pending VisioFex orders with a session but no transaction ID created within this window will be refreshed automatically.', 'visiofex-woocommerce' ),
+        'description' => 'On Orders page load, pending ' . kc_get_brand_name() . ' orders with a session but no transaction ID created within this window will be refreshed automatically.',
         'default'     => 24,
         'desc_tip'    => true,
         'custom_attributes' => array(
@@ -1532,26 +1660,26 @@ add_filter( 'woocommerce_settings_api_form_fields_visiofex', function( $fields )
 } );
 
 // Persist option manually if gateway does not automatically store custom numeric field name
-add_action( 'woocommerce_update_options_payment_gateways_visiofex', function() {
-    if ( isset( $_POST['woocommerce_visiofex_auto_sync_hours'] ) ) {
-        $raw = intval( $_POST['woocommerce_visiofex_auto_sync_hours'] );
+add_action( 'woocommerce_update_options_payment_gateways_hcwc', function() {
+    if ( isset( $_POST['woocommerce_hcwc_auto_sync_hours'] ) ) {
+        $raw = intval( $_POST['woocommerce_hcwc_auto_sync_hours'] );
         if ( $raw < 1 ) $raw = 1; if ( $raw > 48 ) $raw = 48;
-        update_option( 'visiofex_auto_sync_hours', $raw );
+        update_option( 'hcwc_auto_sync_hours', $raw );
     }
 } );
 
 // Provide backward compatible retrieval in constructor (if needed elsewhere) via helper
-if ( ! function_exists( 'visiofex_get_auto_sync_hours' ) ) {
-    function visiofex_get_auto_sync_hours() {
-        $h = (int) get_option( 'visiofex_auto_sync_hours', 24 );
+if ( ! function_exists( 'hcwc_get_auto_sync_hours' ) ) {
+    function hcwc_get_auto_sync_hours() {
+        $h = (int) get_option( 'hcwc_auto_sync_hours', 24 );
         if ( $h < 1 ) $h = 1; if ( $h > 48 ) $h = 48; return $h;
     }
 }
 
 // Logging helper outside the gateway class context
-if ( ! function_exists( 'visiofex_logging_enabled' ) ) {
-    function visiofex_logging_enabled() : bool {
-        $settings = get_option( 'woocommerce_visiofex_settings', array() );
+if ( ! function_exists( 'hcwc_logging_enabled' ) ) {
+    function hcwc_logging_enabled() : bool {
+        $settings = get_option( 'woocommerce_hcwc_settings', array() );
         if ( isset( $settings['logging'] ) ) {
             return $settings['logging'] === 'yes';
         }
@@ -1560,11 +1688,11 @@ if ( ! function_exists( 'visiofex_logging_enabled' ) ) {
     }
 }
 
-if ( ! function_exists( 'visiofex_log' ) ) {
-    function visiofex_log( $message, $level = 'info' ) {
-        if ( ! visiofex_logging_enabled() ) return;
+if ( ! function_exists( 'hcwc_log' ) ) {
+    function hcwc_log( $message, $level = 'info' ) {
+        if ( ! hcwc_logging_enabled() ) return;
         if ( ! function_exists( 'wc_get_logger' ) ) return;
         $logger = wc_get_logger();
-        $logger->log( $level, $message, array( 'source' => 'visiofex' ) );
+        $logger->log( $level, $message, array( 'source' => 'hcwc' ) );
     }
 }

@@ -1,16 +1,16 @@
-# VisioFex Payment Icons Troubleshooting
+# Payment Icons Troubleshooting
 
 ## Issue: Payment Icons Appear Too Large
 
-If you're using Elementor or other page builders and the VisioFex payment icons appear oversized on your checkout page, add this CSS to fix the display:
+If you're using Elementor or other page builders and the payment icons appear oversized on your checkout page, add this CSS to fix the display:
 
 ### Solution 1: Elementor Custom CSS
 1. Go to **Elementor > Custom CSS** (or your theme's custom CSS)
 2. Add this code:
 
 ```css
-/* Fix VisioFex payment icons sizing in Elementor */
-.elementor .visiofex-card-icon {
+/* Fix payment icons sizing in Elementor */
+.elementor .hcwc-card-icon {
     height: 32px !important;
     width: auto !important;
     max-height: 32px !important;
@@ -19,11 +19,11 @@ If you're using Elementor or other page builders and the VisioFex payment icons 
 
 /* Mobile responsive */
 @media (max-width: 768px) {
-    .elementor .visiofex-card-icon {
+    .elementor .hcwc-card-icon {
         height: 28px !important;
         max-height: 28px !important;
     }
-    
+
 }
 ```
 
@@ -40,9 +40,9 @@ Add the CSS code to your active theme's `style.css` file (or child theme's `styl
 
 For **Visual Composer**, **Beaver Builder**, or other page builders, replace `.elementor` with the appropriate class:
 
-- Visual Composer: `.vc_row .visiofex-card-icon`
-- Beaver Builder: `.fl-builder .visiofex-card-icon`
-- Gutenberg Blocks: `.wp-block-column .visiofex-card-icon`
+- Visual Composer: `.vc_row .hcwc-card-icon`
+- Beaver Builder: `.fl-builder .hcwc-card-icon`
+- Gutenberg Blocks: `.wp-block-column .hcwc-card-icon`
 
 ## Need Help?
 

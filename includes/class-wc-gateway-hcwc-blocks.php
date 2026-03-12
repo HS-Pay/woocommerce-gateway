@@ -2,12 +2,12 @@
 defined( 'ABSPATH' ) || exit;
 use Automattic\WooCommerce\Blocks\Payments\Integrations\AbstractPaymentMethodType;
 
-class WC_Gateway_VisioFex_Blocks extends AbstractPaymentMethodType {
-    protected $name = 'visiofex';
+class WC_Gateway_HCWC_Blocks extends AbstractPaymentMethodType {
+    protected $name = 'hcwc';
     protected $settings = array();
 
     public function initialize() {
-        $this->settings = get_option( 'woocommerce_visiofex_settings', array() );
+        $this->settings = get_option( 'woocommerce_hcwc_settings', array() );
     }
 
     public function is_active() {
@@ -15,10 +15,10 @@ class WC_Gateway_VisioFex_Blocks extends AbstractPaymentMethodType {
     }
 
     public function get_payment_method_script_handles() {
-        $handle   = 'wc-visiofex-blocks';
+        $handle   = 'wc-hcwc-blocks';
         $rel_path = 'assets/blocks/index.js';
-        $file     = VXF_WC_PLUGIN_DIR . $rel_path;
-        $url      = VXF_WC_PLUGIN_URL . $rel_path;
+        $file     = KC_WC_PLUGIN_DIR . $rel_path;
+        $url      = KC_WC_PLUGIN_URL . $rel_path;
         if ( ! file_exists( $file ) ) {
             return array();
         }
@@ -26,7 +26,7 @@ class WC_Gateway_VisioFex_Blocks extends AbstractPaymentMethodType {
             $handle,
             $url,
             array( 'wc-blocks-registry', 'wc-settings', 'wp-element', 'wp-html-entities' ),
-            VXF_WC_VERSION,
+            KC_WC_VERSION,
             true
         );
         return array( $handle );
@@ -34,7 +34,7 @@ class WC_Gateway_VisioFex_Blocks extends AbstractPaymentMethodType {
 
     public function get_payment_method_data() {
         // Instantiate gateway only to read defaults (safe: no API call here)
-        $gateway = new WC_Gateway_VisioFex();
+        $gateway = new WC_Gateway_HCWC();
         $default_title       = $gateway->form_fields['title']['default'];
         $default_description = $gateway->form_fields['description']['default'];
 
@@ -46,8 +46,9 @@ class WC_Gateway_VisioFex_Blocks extends AbstractPaymentMethodType {
         return array(
             'title'       => $this->get_setting( 'title', $default_title ),
             'description' => $description,
-            // No logo/icon exposed anymore
-            'pluginUrl'   => esc_url( VXF_WC_PLUGIN_URL ),
+            'pluginUrl'   => esc_url( KC_WC_PLUGIN_URL ),
+            'paymentType' => $this->get_setting( 'payment_type', 'echeck' ),
+            'brandName'   => kc_get_brand_name(),
             'supports'    => array( 'products' ),
         );
     }
