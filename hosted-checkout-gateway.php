@@ -136,6 +136,7 @@ add_action( 'plugins_loaded', function() {
 
             // Settings values with top-of-file defaults as fallback
             $this->enabled        = $this->get_option( 'enabled', 'no' );
+            $this->testmode       = false;
             $this->payment_type   = $this->get_option( 'payment_type', 'echeck' );
 
             $default_title = __( 'Pay via Plaid', 'hcwc' );
