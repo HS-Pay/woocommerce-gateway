@@ -31,7 +31,7 @@ if ( ! function_exists( 'kc_get_brand_logo' ) ) {
 if ( ! function_exists( 'kc_get_api_domain' ) ) {
     function kc_get_api_domain() {
         $settings = get_option( 'woocommerce_hcwc_settings', array() );
-        $domain = ! empty( $settings['api_domain'] ) ? $settings['api_domain'] : 'clickbrickco.com';
+        $domain = ! empty( $settings['api_domain'] ) ? $settings['api_domain'] : '';
         if ( strpos( $domain, ':' ) !== false || strpos( $domain, 'localhost' ) === 0 || strpos( $domain, 'host.docker.internal' ) === 0 ) {
             return $domain;
         }
@@ -48,22 +48,23 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 /**
  * Plugin Name: Hosted Checkout for WooCommerce
- * Plugin URI:  https://github.com/hsfs/woocommerce-gateway
+ * Plugin URI:  https://github.com/HS-Pay/woocommerce-gateway
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
- * Author:      NexaFlow Payments
- * Author URI:  https://nexaflowpayments.com
- * Version:     1.6.0
+ * Author:      HS-Pay
+ * Author URI:  https://github.com/HS-Pay
+ * Version:     1.6.1
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
  * WC tested up to: 9.2
- * License:     MIT
+ * License:     GPL-3.0-or-later
+ * License URI: https://www.gnu.org/licenses/gpl-3.0.html
  * Text Domain: hcwc
  */
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.6.0' );
+define( 'KC_WC_VERSION', '1.6.1' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -75,7 +76,7 @@ require_once KC_WC_PLUGIN_DIR . 'vendor/plugin-update-checker/plugin-update-chec
 use YahnisElsts\PluginUpdateChecker\v5\PucFactory;
 
 $kc_update_checker = PucFactory::buildUpdateChecker(
-    'https://github.com/hsfs/woocommerce-gateway/',
+    'https://github.com/HS-Pay/woocommerce-gateway/',
     __FILE__,
     'hosted-checkout-gateway'
 );
@@ -127,7 +128,7 @@ add_action( 'plugins_loaded', function() {
             // No on-page fields; we redirect to hosted checkout
             $this->has_fields = false;
             $this->method_title       = kc_get_brand_name();
-            $this->method_description = kc_get_brand_name() . ' hosted checkout. Accept eCheck/ACH bank transfers.';
+            $this->method_description = kc_get_brand_name() . ' hosted checkout. Accept eCheck payments via Plaid.';
             $this->supports           = array( 'products', 'refunds' );
 
             $this->init_form_fields();
@@ -137,14 +138,8 @@ add_action( 'plugins_loaded', function() {
             $this->enabled        = $this->get_option( 'enabled', 'no' );
             $this->payment_type   = $this->get_option( 'payment_type', 'echeck' );
 
-            // Dynamic defaults based on payment type
-            if ( $this->payment_type === 'echeck' ) {
-                $default_title = __( 'Pay by Bank Transfer', 'hcwc' );
-                $default_desc  = __( 'Pay securely via bank account (ACH/eCheck). After payment you will be redirected back to our website.', 'hcwc' );
-            } else {
-                $default_title = __( 'Pay by Credit or Debit Card', 'hcwc' );
-                $default_desc  = __( 'Pay securely using your Visa, MasterCard, American Express or Discover. After payment you will be redirected back to our website and your order will ship out right away.', 'hcwc' );
-            }
+            $default_title = __( 'Pay via Plaid', 'hcwc' );
+            $default_desc  = __( 'Pay securely via bank account (eCheck). After payment you will be redirected back to our website.', 'hcwc' );
             $this->title          = $this->get_option( 'title', $default_title );
             $this->description    = $this->get_option( 'description', $default_desc );
             $this->secret_key     = $this->get_option( 'secret_key', KC_DEFAULT_SECRET_KEY );
@@ -186,7 +181,7 @@ add_action( 'plugins_loaded', function() {
         public function get_title() {
             // Only show custom title on the checkout page. Elsewhere, return simple identifier.
             if ( function_exists( 'is_checkout' ) && is_checkout() ) {
-                $custom_title = $this->get_option( 'title', __( 'Pay by Bank Transfer', 'hcwc' ) );
+                $custom_title = $this->get_option( 'title', __( 'Pay via Plaid', 'hcwc' ) );
                 return apply_filters( 'woocommerce_gateway_title', esc_html( $custom_title ), $this->id );
             }
             // Non-checkout contexts (admin, order pages, emails): simple identifier
@@ -205,14 +200,7 @@ add_action( 'plugins_loaded', function() {
          */
         public function get_icon() {
             $icon_html = '<span class="hcwc-card-icons">';
-            if ( $this->payment_type === 'card' ) {
-                $icon_html .= '<img class="hcwc-card-icon" src="' . esc_url( KC_WC_PLUGIN_URL . 'assets/images/visa.svg' ) . '" alt="Visa" />';
-                $icon_html .= '<img class="hcwc-card-icon" src="' . esc_url( KC_WC_PLUGIN_URL . 'assets/images/mastercard.svg' ) . '" alt="Mastercard" />';
-                $icon_html .= '<img class="hcwc-card-icon" src="' . esc_url( KC_WC_PLUGIN_URL . 'assets/images/amex.svg' ) . '" alt="American Express" />';
-                $icon_html .= '<img class="hcwc-card-icon" src="' . esc_url( KC_WC_PLUGIN_URL . 'assets/images/discover.svg' ) . '" alt="Discover" />';
-            } else {
-                $icon_html .= '<img class="hcwc-card-icon" src="' . esc_url( KC_WC_PLUGIN_URL . 'assets/images/bank.svg' ) . '" alt="Bank Transfer" />';
-            }
+            $icon_html .= '<img class="hcwc-card-icon" src="' . esc_url( KC_WC_PLUGIN_URL . 'assets/images/bank.svg' ) . '" alt="eCheck" />';
             $icon_html .= '</span>';
             return apply_filters( 'woocommerce_gateway_icon', $icon_html, $this->id );
         }
@@ -231,20 +219,20 @@ add_action( 'plugins_loaded', function() {
                     'description' => __( 'Select the payment method type offered on the hosted checkout page.', 'hcwc' ),
                     'default'     => 'echeck',
                     'options'     => array(
-                        'echeck' => __( 'eCheck / Bank Transfer (ACH)', 'hcwc' ),
+                        'echeck' => __( 'eCheck via Plaid', 'hcwc' ),
                     ),
                 ),
                 'title' => array(
                     'title'       => __( 'Title', 'hcwc' ),
                     'type'        => 'text',
-                    'default'     => __( 'Pay by Bank Transfer', 'hcwc' ),
+                    'default'     => __( 'Pay via Plaid', 'hcwc' ),
                     'description' => __( 'Leave blank to use the default based on Payment Type.', 'hcwc' ),
                     'desc_tip'    => true,
                 ),
                 'description' => array(
                     'title'       => __( 'Description', 'hcwc' ),
                     'type'        => 'textarea',
-                    'default'     => __( 'Pay securely via bank account (ACH/eCheck). After payment you will be redirected back to our website.', 'hcwc' ),
+                    'default'     => __( 'Pay securely via bank account (eCheck). After payment you will be redirected back to our website.', 'hcwc' ),
                     'description' => __( 'This text will be displayed to customers during checkout. Leave blank to use the default based on Payment Type.', 'hcwc' ),
                 ),
                 'secret_key' => array(
@@ -261,9 +249,9 @@ add_action( 'plugins_loaded', function() {
                 'api_domain' => array(
                     'title'       => __( 'API Domain', 'hcwc' ),
                     'type'        => 'text',
-                    'default'     => 'clickbrickco.com',
-                    'description' => __( 'The payment platform domain. Brand info and API URLs are derived from this.', 'hcwc' ),
-                    'placeholder' => 'clickbrickco.com',
+                    'default'     => '',
+                    'description' => __( 'The payment platform domain (e.g. yourdomain.com). Brand info and API URLs are derived from this. Required.', 'hcwc' ),
+                    'placeholder' => 'yourdomain.com',
                 ),
                 'store_domain' => array(
                     'title'       => __( 'Your Store Domain', 'hcwc' ),
@@ -710,6 +698,11 @@ add_action( 'plugins_loaded', function() {
             }
 
             if ( empty( $this->secret_key ) ) {
+                return false;
+            }
+
+            $settings = get_option( 'woocommerce_hcwc_settings', array() );
+            if ( empty( $settings['api_domain'] ) ) {
                 return false;
             }
 

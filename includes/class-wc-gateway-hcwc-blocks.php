@@ -47,7 +47,6 @@ class WC_Gateway_HCWC_Blocks extends AbstractPaymentMethodType {
             'title'       => $this->get_setting( 'title', $default_title ),
             'description' => $description,
             'pluginUrl'   => esc_url( KC_WC_PLUGIN_URL ),
-            'paymentType' => $this->get_setting( 'payment_type', 'echeck' ),
             'brandName'   => kc_get_brand_name(),
             'supports'    => array( 'products' ),
         );

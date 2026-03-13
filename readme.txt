@@ -3,9 +3,9 @@ Contributors: your-company
 Tags: payments, checkout, woocommerce, hosted-checkout, blocks, refunds
 Requires at least: 6.0
 Tested up to: 6.6
-Stable tag: 1.5.6
-License: MIT
-License URI: https://opensource.org/licenses/MIT
+Stable tag: 1.6.1
+License: GPL-3.0-or-later
+License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
 Hosted checkout gateway for WooCommerce with refunds and Blocks support. Brand auto-detected from API.
 
@@ -15,7 +15,7 @@ Hosted checkout gateway for WooCommerce with refunds and Blocks support. Brand a
 - **Enhanced Payment Flow**: Robust redirect fallback system handles plugin conflicts and ensures reliable checkout experience
 - **Auto-Configuration**: Store URLs are automatically detected and configured to prevent setup errors
 - **Comprehensive Logging**: Detailed diagnostic logging with sensitive data protection for easy troubleshooting
-- **Settings page includes**: Test mode, Secret Key, Vendor ID, Auto-sync window (1-48 hours), and Debug logging
+- **Settings page includes**: Secret Key, Vendor ID, Auto-sync window (1-48 hours), and Debug logging
 - **Hosted Checkout**: Creates a hosted checkout session and redirects customers to the secure payment page
 - **Full Refund Support**: Process refunds directly from the WooCommerce order screen with automatic synchronization
 - **WooCommerce Blocks**: Full compatibility with modern WooCommerce block-based checkout
@@ -52,12 +52,19 @@ In WordPress (https://yoursite/wp-admin):
 - Set the **API Domain** to your payment platform's domain
 - **Store Domain** is automatically detected (shows your site URL) - only change if using a different domain
 - Set **Auto Sync Window** to desired hours (1-48, default 24h) for automatic order refresh frequency
-- For production, uncheck "Enable test mode"
 - **Debugging**: Check "Enable debugging" for comprehensive logging including auto-sync operations (recommended during setup)
 - Check the "Enable" checkbox at the top to activate the payment method
 - Save changes to enable the gateway
 
 == Changelog ==
+
+= 1.6.1 =
+* **LICENSE**: Switched from MIT to GPL-3.0-or-later for WordPress ecosystem compatibility
+* **IMPROVED**: Payment type label updated to "eCheck via Plaid"
+* **CLEANUP**: Removed dead card payment code paths (eCheck-only gateway)
+
+= 1.6.0 =
+* **MAJOR**: Rebranded to Hosted Checkout Gateway (hcwc) with migration from legacy gateway ID
 
 = 1.5.6 =
 * **CRITICAL FIX**: Fixed "back to store" button on payment portal - now correctly returns to checkout page instead of order received page
