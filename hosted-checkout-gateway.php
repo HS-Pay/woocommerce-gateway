@@ -251,8 +251,8 @@ add_action( 'plugins_loaded', function() {
                     'title'       => __( 'API Domain', 'hcwc' ),
                     'type'        => 'text',
                     'default'     => '',
-                    'description' => __( 'The payment platform domain (e.g. yourdomain.com). Brand info and API URLs are derived from this. Required.', 'hcwc' ),
-                    'placeholder' => 'yourdomain.com',
+                    'description' => __( 'Your payment platform domain provided by your payment provider (e.g. clickbrickco.com). This is NOT your store domain. Brand info and API URLs are derived from this. Required.', 'hcwc' ),
+                    'placeholder' => 'clickbrickco.com',
                 ),
                 'store_domain' => array(
                     'title'       => __( 'Your Store Domain', 'hcwc' ),
@@ -823,7 +823,7 @@ add_action( 'plugins_loaded', function() {
 
             $payload = array(
                 'vendor'      => $this->vendor_id ?: null,
-                'env'         => 'live',
+                'env'         => 'prod',
                 'mode'        => $this->mode ?: 'payment',
                 'currency'    => strtolower( $order->get_currency() ),
                 'amount'      => number_format( $order_total, 2, '.', '' ),
