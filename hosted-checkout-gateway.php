@@ -694,10 +694,6 @@ add_action( 'plugins_loaded', function() {
                 return false;
             }
 
-            if ( ! is_ssl() ) {
-                return false;
-            }
-
             if ( empty( $this->secret_key ) ) {
                 return false;
             }
