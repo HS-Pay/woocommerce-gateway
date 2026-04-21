@@ -81,6 +81,8 @@
 
         return null;
     }
+
+    function extractRedirectUrl(responseData) {
         if (!responseData || !responseData.payment_result) {
             return null;
         }

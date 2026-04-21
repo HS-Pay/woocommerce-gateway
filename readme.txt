@@ -3,7 +3,7 @@ Contributors: your-company
 Tags: payments, checkout, woocommerce, hosted-checkout, blocks, refunds
 Requires at least: 6.0
 Tested up to: 6.6
-Stable tag: 1.6.2
+Stable tag: 1.6.4
 License: GPL-3.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -57,6 +57,11 @@ In WordPress (https://yoursite/wp-admin):
 - Save changes to enable the gateway
 
 == Changelog ==
+
+= 1.6.4 =
+* **FIX**: Restored missing `extractRedirectUrl` function declaration in redirect fallback JS (caused SyntaxError that silently disabled the fallback banner since 1.6.0)
+* **FIX**: Auto-sync no longer writes "function called - checking conditions" to the log on every admin page load - only logs when run on the Orders screen
+* **FIX**: Debug logging checkbox now consistently governs all plugin logs - auto-sync previously logged regardless of the setting
 
 = 1.6.1 =
 * **LICENSE**: Switched from MIT to GPL-3.0-or-later for WordPress ecosystem compatibility

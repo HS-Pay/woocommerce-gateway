@@ -52,7 +52,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.6.3
+ * Version:     1.6.4
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -64,7 +64,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.6.3' );
+define( 'KC_WC_VERSION', '1.6.4' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -1473,27 +1473,20 @@ if ( ! function_exists( 'hcwc_batch_auto_sync_orders' ) ) {
      * Runs silently on Orders list load. Uses transient lock to avoid repeated API hits.
      */
     function hcwc_batch_auto_sync_orders() {
-        // Debug logging to see if function is called at all
-        hcwc_log( 'Auto-sync: function called - checking conditions' );
-        
-        if ( ! is_admin() ) {
-            hcwc_log( 'Auto-sync: not admin - exiting' );
-            return;
-        }
-        if ( ! current_user_can( 'manage_woocommerce' ) ) {
-            hcwc_log( 'Auto-sync: user cannot manage woocommerce - exiting' );
-            return;
-        }
-        
-        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
-        
+        if ( ! is_admin() ) return;
+        if ( ! current_user_can( 'manage_woocommerce' ) ) return;
+
+        $screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+
         // Support both classic and HPOS orders screens
         $valid_screens = array( 'edit-shop_order', 'woocommerce_page_wc-orders' );
         if ( ! $screen || ! in_array( $screen->id, $valid_screens, true ) ) {
             return;
         }
 
-        // Check and log transient lock status
+        // Only log from this point on - we're on a relevant screen.
+        hcwc_log( 'Auto-sync: triggered on ' . $screen->id );
+
         $lock_exists = get_transient( 'kc_auto_sync_lock' );
         if ( $lock_exists ) {
             hcwc_log( 'Auto-sync: locked (transient exists) - exiting' );
@@ -1670,11 +1663,7 @@ if ( ! function_exists( 'hcwc_get_auto_sync_hours' ) ) {
 if ( ! function_exists( 'hcwc_logging_enabled' ) ) {
     function hcwc_logging_enabled() : bool {
         $settings = get_option( 'woocommerce_hcwc_settings', array() );
-        if ( isset( $settings['logging'] ) ) {
-            return $settings['logging'] === 'yes';
-        }
-        // Fallback: assume enabled by default
-        return true;
+        return isset( $settings['logging'] ) && $settings['logging'] === 'yes';
     }
 }
 
