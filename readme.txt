@@ -3,7 +3,7 @@ Contributors: your-company
 Tags: payments, checkout, woocommerce, hosted-checkout, blocks, refunds
 Requires at least: 6.0
 Tested up to: 6.6
-Stable tag: 1.6.4
+Stable tag: 1.6.5
 License: GPL-3.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -57,6 +57,10 @@ In WordPress (https://yoursite/wp-admin):
 - Save changes to enable the gateway
 
 == Changelog ==
+
+= 1.6.5 =
+* **FIX**: Removed misleading placeholder on the API Domain field (merchants were mistaking the placeholder for an entered value and saving with the field blank, silently hiding the gateway at checkout)
+* **NEW**: Save-time validation - enabling the gateway with Secret Key, Vendor ID, or API Domain blank now surfaces a clear admin error explaining why the payment method will not appear at checkout
 
 = 1.6.4 =
 * **FIX**: Restored missing `extractRedirectUrl` function declaration in redirect fallback JS (caused SyntaxError that silently disabled the fallback banner since 1.6.0)

@@ -52,7 +52,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.6.4
+ * Version:     1.6.5
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -64,7 +64,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.6.4' );
+define( 'KC_WC_VERSION', '1.6.5' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -252,7 +252,6 @@ add_action( 'plugins_loaded', function() {
                     'type'        => 'text',
                     'default'     => '',
                     'description' => __( 'Your payment platform domain provided by your payment provider (e.g. clickbrickco.com). This is NOT your store domain. Brand info and API URLs are derived from this. Required.', 'hcwc' ),
-                    'placeholder' => 'clickbrickco.com',
                 ),
                 'store_domain' => array(
                     'title'       => __( 'Your Store Domain', 'hcwc' ),
@@ -316,6 +315,37 @@ add_action( 'plugins_loaded', function() {
         protected function get_api_base() {
             if ( ! empty( $this->api_base ) ) return untrailingslashit( $this->api_base );
             return kc_get_api_url();
+        }
+
+        public function process_admin_options() {
+            $saved = parent::process_admin_options();
+
+            $this->init_settings();
+            if ( 'yes' !== ( $this->settings['enabled'] ?? 'no' ) ) {
+                return $saved;
+            }
+
+            $required = array(
+                'secret_key' => __( 'Secret Key', 'hcwc' ),
+                'vendor_id'  => __( 'Vendor ID', 'hcwc' ),
+                'api_domain' => __( 'API Domain', 'hcwc' ),
+            );
+            $missing = array();
+            foreach ( $required as $key => $label ) {
+                if ( empty( $this->settings[ $key ] ) ) {
+                    $missing[] = $label;
+                }
+            }
+
+            if ( ! empty( $missing ) && class_exists( 'WC_Admin_Settings' ) ) {
+                WC_Admin_Settings::add_error( sprintf(
+                    __( '%1$s is enabled but missing required fields: %2$s. This payment method will not appear at checkout until configured.', 'hcwc' ),
+                    kc_get_brand_name(),
+                    implode( ', ', $missing )
+                ) );
+            }
+
+            return $saved;
         }
 
         public function fetch_brand_info() {
