@@ -52,7 +52,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.6.5
+ * Version:     1.7.0
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -64,7 +64,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.6.5' );
+define( 'KC_WC_VERSION', '1.7.0' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -817,20 +817,23 @@ add_action( 'plugins_loaded', function() {
 
             $this->log( 'Generated URLs - Success: ' . $success . ', Return: ' . $return . ', Cancel: ' . $cancel );
 
+            $billing_phone = $order->get_billing_phone();
+            if ( ! $billing_phone ) {
+                $this->log( 'Payment failed: Missing billing phone for order #' . $order_id, 'error' );
+                throw new Exception( __( 'A phone number is required to complete checkout. Please add a billing phone number and try again.', 'hcwc' ) );
+            }
+
             $customer_details = array();
             $billing_email = $order->get_billing_email();
             $billing_first = $order->get_billing_first_name();
             $billing_last  = $order->get_billing_last_name();
             if ( $billing_email && $billing_first && $billing_last ) {
                 $customer_details = array(
-                    'firstName' => $billing_first,
-                    'lastName'  => $billing_last,
-                    'email'     => $billing_email,
+                    'firstName'   => $billing_first,
+                    'lastName'    => $billing_last,
+                    'email'       => $billing_email,
+                    'phoneNumber' => $billing_phone,
                 );
-                $billing_phone = $order->get_billing_phone();
-                if ( $billing_phone ) {
-                    $customer_details['phoneNumber'] = $billing_phone;
-                }
                 $billing_addr1 = $order->get_billing_address_1();
                 $billing_city  = $order->get_billing_city();
                 $billing_country = $order->get_billing_country();
@@ -1211,6 +1214,17 @@ add_action( 'plugins_loaded', function() {
         }
         return $total_rows;
     }, 999, 2 ); // Very high priority
+
+    /**
+     * GLOBAL HOOK: Ensure billing phone is required at checkout — hosted checkout
+     * needs it to skip the redundant billing-info step.
+     */
+    add_filter( 'woocommerce_checkout_fields', function( $fields ) {
+        if ( isset( $fields['billing']['billing_phone'] ) ) {
+            $fields['billing']['billing_phone']['required'] = true;
+        }
+        return $fields;
+    }, 20 );
 
     /**
      * Add Settings link on Plugins page.
