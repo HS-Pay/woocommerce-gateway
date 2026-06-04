@@ -52,7 +52,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.4
+ * Version:     1.8.5
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -64,7 +64,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.4' );
+define( 'KC_WC_VERSION', '1.8.5' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -605,15 +605,15 @@ add_action( 'plugins_loaded', function() {
                 } else if ( in_array( $status, array( 'failed', 'cancelled', 'expired' ), true ) ) {
                     $this->log( 'Payment failed with status: ' . $status, 'warning' );
                     $order->add_order_note( kc_get_brand_name() . ': payment ' . $status . ' (verified via session).' );
-                    if ( $status === 'failed' ) {
-                        $order->update_status( 'failed', kc_get_brand_name() . ' payment failed.' );
+                    if ( ! $order->has_status( 'failed' ) ) {
+                        $order->update_status( 'failed', sprintf( '%s: session %s.', kc_get_brand_name(), $status ) );
                     }
                     $order->save();
                     return;
                 }
             }
 
-            $this->log( 'Polling completed - Payment status still pending after 4 attempts', 'warning' );
+            $this->log( 'Polling completed - Payment status still pending after ' . count( $poll_delays ) . ' attempt(s)', 'warning' );
             $order->add_order_note( kc_get_brand_name() . ': session not yet paid after return; order left pending.' );
         }
 
@@ -947,9 +947,12 @@ add_action( 'plugins_loaded', function() {
 
             $this->log( 'API payload prepared - Amount: ' . $order_total . ', Items: ' . count( $line_items ) . ' (products: ' . count( $order->get_items() ) . ', coupons: ' . count( $order->get_coupons() ) . ')' );
 
-            // Create hosted checkout session with a stable per-order idempotency key
-            // so a network retry of the same order does not create a duplicate session.
-            $idk = 'create_' . $order->get_id() . '_' . wp_generate_uuid4();
+            // Create hosted checkout session with a deterministic per-order
+            // idempotency key. A WooCommerce retry of process_payment for the
+            // same order (network blip, customer re-submit) must hit the same
+            // key so platform-api can deduplicate. Including the order key
+            // makes the value unguessable from the order id alone.
+            $idk = 'create_' . $order->get_id() . '_' . md5( $order->get_order_key() );
             $this->log( 'Making API request to create checkout session for order #' . $order_id );
 
             $res = $this->request( 'POST', 'checkout/sessions/create', $payload, $idk );
@@ -1085,10 +1088,19 @@ add_action( 'plugins_loaded', function() {
 
             // Allow the refund if there are existing refunds and this is likely a retry
             $is_retry = ( $already_refunded > 0 && abs( $refund_amount - $already_refunded ) < 0.01 );
-            
+
             if ( $difference > $tolerance && ! $is_retry ) {
                 $this->log( 'Refund validation failed: Amount (' . $refund_amount . ') exceeds remaining refundable amount (' . $remaining_refundable . ') by ' . $difference . ' (tolerance: ' . $tolerance . ')', 'error' );
                 return new WP_Error( 'invalid_refund_amount', 'Refund amount exceeds remaining refundable amount' );
+            }
+
+            // Absolute ceiling enforced even on retries: a refund must never
+            // exceed the order total. The retry bypass above is only for the
+            // remaining-refundable math when WC already recorded the refund;
+            // it does not authorize sending an over-cap value to the API.
+            if ( round( (float) $refund_amount, 2 ) > round( (float) $order_total, 2 ) + 0.01 ) {
+                $this->log( 'Refund validation failed: Amount (' . $refund_amount . ') exceeds order total (' . $order_total . ')', 'error' );
+                return new WP_Error( 'invalid_refund_amount', 'Refund amount exceeds order total' );
             }
 
             if ( $refund_amount <= 0 ) {
@@ -1117,8 +1129,14 @@ add_action( 'plugins_loaded', function() {
             // Use the known correct refund endpoint
             $endpoint = 'transactions/' . $payment_id . '/refund';
             $this->log( 'Making refund API request to endpoint: ' . $endpoint );
-            
-            $res = $this->request( 'POST', $endpoint, $payload );
+
+            // Deterministic idempotency key: a retry of the same refund (same
+            // order, same amount, same reason) hits the same key so the backend
+            // can deduplicate. A different amount or reason is treated as a
+            // distinct refund.
+            $refund_idk = 'refund_' . $order_id . '_' . md5( number_format( (float) $refund_amount, 2, '.', '' ) . '|' . (string) $reason );
+
+            $res = $this->request( 'POST', $endpoint, $payload, $refund_idk );
             $code = $res['code'];
             $body = $res['body'];
 
@@ -1912,7 +1930,10 @@ if ( ! function_exists( 'hcwc_apply_gateway_status_to_order' ) ) {
         $changed = false;
 
         if ( $gateway_status === 'cleared' ) {
-            if ( ! $order->is_paid() ) {
+            // Skip if order is already paid OR is in a terminal state we should
+            // not re-open. A refunded/cancelled order that races with a late
+            // bank-clear notification should stay as the merchant left it.
+            if ( ! $order->is_paid() && ! $order->has_status( array( 'refunded', 'cancelled', 'failed' ) ) ) {
                 $order->payment_complete( $txn_id );
                 $order->update_meta_data( '_hcwc_gateway_set_wc_status', $order->get_status() );
                 $note = $context === 'sweep'
@@ -2059,6 +2080,123 @@ if ( ! function_exists( 'hcwc_sync_gateway_status_for_order' ) ) {
 
         if ( ! $changed && $prev !== $gateway_status ) {
             hcwc_log( 'Gateway sweep: order #' . $order->get_id() . ' status ' . ( $prev ?: 'unknown' ) . ' -> ' . $gateway_status . ' (no WC transition)' );
+        }
+    }
+}
+
+/**
+ * Void an in-flight ACH payment when a merchant cancels a held order.
+ *
+ * Fires on the on-hold -> cancelled transition only. When a merchant cancels
+ * an order whose ACH is still pending verification, the bank will otherwise
+ * eventually clear the debit and we'd be holding funds on a cancelled order
+ * (or producing a reject loop). platform-api's refund endpoint already routes
+ * to GreenMoney's CancelCheck when the check has not yet been processed,
+ * so calling refund here with the full order amount voids the payment cleanly.
+ *
+ * Idempotency: a meta flag (_hcwc_void_attempted) prevents a re-cancel from
+ * firing the call again, and the API itself receives a deterministic
+ * Idempotency-Key so a network retry within a single attempt is also safe.
+ */
+add_action( 'woocommerce_order_status_on-hold_to_cancelled', 'hcwc_void_ach_on_cancel', 10, 2 );
+
+if ( ! function_exists( 'hcwc_void_ach_on_cancel' ) ) {
+    function hcwc_void_ach_on_cancel( $order_id, $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            $order = wc_get_order( $order_id );
+            if ( ! $order ) { return; }
+        }
+        if ( $order->get_payment_method() !== 'hcwc' ) { return; }
+
+        $payment_id = $order->get_meta( '_hcwc_payment_id' );
+        if ( ! $payment_id ) {
+            // Nothing was captured; cancellation needs no backend action.
+            return;
+        }
+
+        // Only attempt the void for non-terminal ACH states. If the bank has
+        // already cleared or returned the check, there is no in-flight ACH
+        // to cancel - the merchant should issue a normal refund instead.
+        $gateway_status = strtolower( (string) $order->get_meta( '_hcwc_gateway_status' ) );
+        if ( $gateway_status && ! in_array( $gateway_status, array( 'pending', 'action_required', '' ), true ) ) {
+            hcwc_log( 'Cancel-void: order #' . $order_id . ' skipped - gateway_status=' . $gateway_status . ' is past void window' );
+            return;
+        }
+
+        if ( $order->get_meta( '_hcwc_void_attempted' ) ) {
+            hcwc_log( 'Cancel-void: order #' . $order_id . ' already attempted, skipping' );
+            return;
+        }
+
+        $settings = get_option( 'woocommerce_hcwc_settings', array() );
+        $api_key  = isset( $settings['secret_key'] ) ? $settings['secret_key'] : '';
+        if ( ! $api_key ) {
+            hcwc_log( 'Cancel-void: order #' . $order_id . ' no API key configured, skipping' );
+            return;
+        }
+
+        if ( ! hcwc_check_rate_limit( $api_key ) ) {
+            // Don't mark _hcwc_void_attempted - let the next sweep / manual cancel retry.
+            hcwc_log( 'Cancel-void: order #' . $order_id . ' rate limited, will retry on next opportunity' );
+            return;
+        }
+
+        $order->update_meta_data( '_hcwc_void_attempted', gmdate( 'c' ) );
+        $order->save();
+
+        $payload = array(
+            'payment_id' => sanitize_text_field( $payment_id ),
+            'amount'     => number_format( (float) $order->get_total(), 2, '.', '' ),
+            'reason'     => 'Order cancelled in WooCommerce',
+        );
+        $idk = 'cancel_' . $order_id . '_' . md5( number_format( (float) $order->get_total(), 2, '.', '' ) );
+
+        $url = trailingslashit( kc_get_api_url() ) . 'transactions/' . rawurlencode( $payment_id ) . '/refund';
+        $resp = wp_remote_post( $url, array(
+            'headers' => array(
+                'Content-Type'    => 'application/json',
+                'X-API-KEY'       => $api_key,
+                'Idempotency-Key' => $idk,
+                'User-Agent'      => kc_get_brand_name() . '-WooCommerce/' . KC_WC_VERSION,
+            ),
+            'timeout' => 30,
+            'body'    => wp_json_encode( $payload ),
+        ) );
+
+        if ( is_wp_error( $resp ) ) {
+            $msg = $resp->get_error_message();
+            hcwc_log( 'Cancel-void: order #' . $order_id . ' API error: ' . $msg, 'warning' );
+            $order->add_order_note( sprintf(
+                '%s: failed to void pending ACH on cancel (%s). Check the eCheck processor portal manually.',
+                kc_get_brand_name(),
+                sanitize_text_field( $msg )
+            ) );
+            return;
+        }
+
+        $code = wp_remote_retrieve_response_code( $resp );
+        if ( $code >= 200 && $code < 300 ) {
+            $order->add_order_note( sprintf(
+                '%s: pending ACH voided via processor cancel.',
+                kc_get_brand_name()
+            ) );
+            $order->update_meta_data( '_hcwc_void_succeeded_at', gmdate( 'c' ) );
+            $order->save();
+            hcwc_log( 'Cancel-void: order #' . $order_id . ' voided successfully' );
+        } else {
+            $body = wp_remote_retrieve_body( $resp );
+            $body_msg = '';
+            $decoded = json_decode( $body, true );
+            if ( is_array( $decoded ) && isset( $decoded['message'] ) ) {
+                $body_msg = sanitize_text_field( $decoded['message'] );
+            }
+            hcwc_log( 'Cancel-void: order #' . $order_id . ' API ' . $code . ': ' . $body_msg, 'warning' );
+            $order->add_order_note( sprintf(
+                '%s: failed to void ACH on cancel (HTTP %d%s). Check the eCheck processor portal manually.',
+                kc_get_brand_name(),
+                $code,
+                $body_msg ? ' - ' . $body_msg : ''
+            ) );
         }
     }
 }
