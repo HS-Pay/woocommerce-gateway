@@ -52,7 +52,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.5
+ * Version:     1.8.6
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -64,7 +64,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.5' );
+define( 'KC_WC_VERSION', '1.8.6' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -1065,40 +1065,38 @@ add_action( 'plugins_loaded', function() {
             $this->log( 'Refund amount validation (formatted) - Order total: ' . $order_total . ', Already refunded: ' . $already_refunded . ', Remaining: ' . $refund_amount );
             $this->log( 'Refund amount validation (raw) - Order total: ' . $order->get_total() . ', Already refunded: ' . $order->get_total_refunded() . ', Requested raw: ' . $amount );
 
-            // Check if there are any existing refunds and handle this edge case
-            if ( $already_refunded > 0 && count( $existing_refunds ) > 0 ) {
-                $this->log( 'Detected existing refunds. This might be a retry of a failed refund attempt.', 'warning' );
-                // Allow the refund to proceed if it's for the same amount, as it might be a retry
-                if ( abs( $refund_amount - $already_refunded ) < 0.01 ) {
-                    $this->log( 'Allowing refund retry for same amount - treating as API-only refund', 'info' );
-                    // Skip WooCommerce validation since the refund record already exists
-                    // We'll just try to send it to the payment API
-                } else {
-                    $this->log( 'Refund amount mismatch - requested: ' . $refund_amount . ', already refunded: ' . $already_refunded, 'error' );
-                }
-            }
-
             // Use a more generous tolerance (0.05) for floating point comparison and round both values
             $tolerance = 0.05;
             $remaining_rounded = round( (float) $remaining_refundable, 2 );
             $refund_rounded = round( (float) $refund_amount, 2 );
             $difference = $refund_rounded - $remaining_rounded;
-            
+
             $this->log( 'Refund validation comparison - Remaining rounded: ' . $remaining_rounded . ', Refund rounded: ' . $refund_rounded . ', Difference: ' . $difference . ', Tolerance: ' . $tolerance );
 
-            // Allow the refund if there are existing refunds and this is likely a retry
-            $is_retry = ( $already_refunded > 0 && abs( $refund_amount - $already_refunded ) < 0.01 );
+            // WooCommerce creates the WC_Order_Refund record BEFORE calling
+            // process_refund(), so $already_refunded here already includes the
+            // current refund's amount. That makes $remaining_refundable look
+            // smaller than it really is. Detect this case by checking whether
+            // the most recently-created refund record matches the amount we're
+            // about to send. If yes, the remaining-balance check would
+            // double-count and is safe to bypass; the absolute order-total
+            // ceiling below still applies. If no match, this is a genuine new
+            // refund and the standard check runs.
+            $current_refund_matches = false;
+            $latest_refund = ! empty( $existing_refunds ) ? reset( $existing_refunds ) : null;
+            if ( $latest_refund && abs( (float) $latest_refund->get_amount() - $refund_amount ) < 0.01 ) {
+                $current_refund_matches = true;
+            }
 
-            if ( $difference > $tolerance && ! $is_retry ) {
+            if ( $difference > $tolerance && ! $current_refund_matches ) {
                 $this->log( 'Refund validation failed: Amount (' . $refund_amount . ') exceeds remaining refundable amount (' . $remaining_refundable . ') by ' . $difference . ' (tolerance: ' . $tolerance . ')', 'error' );
                 return new WP_Error( 'invalid_refund_amount', 'Refund amount exceeds remaining refundable amount' );
             }
 
             // Absolute ceiling enforced even on retries: a refund must never
-            // exceed the order total. The retry bypass above is only for the
-            // remaining-refundable math when WC already recorded the refund;
-            // it does not authorize sending an over-cap value to the API.
-            if ( round( (float) $refund_amount, 2 ) > round( (float) $order_total, 2 ) + 0.01 ) {
+            // exceed the order total. Both operands are rounded to 2 dp by
+            // wc_format_decimal earlier, so no rounding slack is needed.
+            if ( round( (float) $refund_amount, 2 ) > round( (float) $order_total, 2 ) ) {
                 $this->log( 'Refund validation failed: Amount (' . $refund_amount . ') exceeds order total (' . $order_total . ')', 'error' );
                 return new WP_Error( 'invalid_refund_amount', 'Refund amount exceeds order total' );
             }
@@ -1106,10 +1104,6 @@ add_action( 'plugins_loaded', function() {
             if ( $refund_amount <= 0 ) {
                 $this->log( 'Refund validation failed: Invalid refund amount (' . $refund_amount . ')', 'error' );
                 return new WP_Error( 'invalid_refund_amount', 'Refund amount must be greater than zero' );
-            }
-
-            if ( $is_retry ) {
-                $this->log( 'Processing as refund retry - WooCommerce refund already exists, sending to payment API only', 'info' );
             }
 
             // Validate payment ID format
@@ -1130,11 +1124,14 @@ add_action( 'plugins_loaded', function() {
             $endpoint = 'transactions/' . $payment_id . '/refund';
             $this->log( 'Making refund API request to endpoint: ' . $endpoint );
 
-            // Deterministic idempotency key: a retry of the same refund (same
-            // order, same amount, same reason) hits the same key so the backend
-            // can deduplicate. A different amount or reason is treated as a
-            // distinct refund.
-            $refund_idk = 'refund_' . $order_id . '_' . md5( number_format( (float) $refund_amount, 2, '.', '' ) . '|' . (string) $reason );
+            // Deterministic idempotency key: includes the current refund-record
+            // count so two distinct refunds of the same amount + reason get
+            // different keys. A retry of the *same* refund (network failure
+            // before WC could finalize the record) hits the same count since
+            // WC removes failed refund records, so the key remains stable
+            // across retries of the same operation.
+            $refund_seq = count( $existing_refunds );
+            $refund_idk = 'refund_' . $order_id . '_' . $refund_seq . '_' . md5( number_format( (float) $refund_amount, 2, '.', '' ) . '|' . (string) $reason );
 
             $res = $this->request( 'POST', $endpoint, $payload, $refund_idk );
             $code = $res['code'];
@@ -1144,11 +1141,7 @@ add_action( 'plugins_loaded', function() {
 
             if ( $code >= 200 && $code < 300 ) {
                 $this->log( 'Refund processed successfully via payment API' );
-                if ( $is_retry ) {
-                    $order->add_order_note( sprintf( '%s refund retry successful: %s. API confirmed refund processing. Reason: %s', kc_get_brand_name(), wc_price( $refund_amount ), $reason ) );
-                } else {
-                    $order->add_order_note( sprintf( '%s refund processed: %s. Reason: %s', kc_get_brand_name(), wc_price( $refund_amount ), $reason ) );
-                }
+                $order->add_order_note( sprintf( '%s refund processed: %s. Reason: %s', kc_get_brand_name(), wc_price( $refund_amount ), $reason ) );
                 return true;
             } else {
                 // Log the full response for debugging (with sensitive data masked)
@@ -2114,11 +2107,20 @@ if ( ! function_exists( 'hcwc_void_ach_on_cancel' ) ) {
             return;
         }
 
+        // Defense-in-depth: refuse to put unvalidated data in the URL path,
+        // matching the format check already used by process_refund. The meta
+        // value is normally a MongoDB ObjectId; anything else means corrupted
+        // state and should not be acted on.
+        if ( ! preg_match( '/^[a-zA-Z0-9_-]+$/', $payment_id ) ) {
+            hcwc_log( 'Cancel-void: order #' . $order_id . ' invalid payment_id format, skipping', 'warning' );
+            return;
+        }
+
         // Only attempt the void for non-terminal ACH states. If the bank has
         // already cleared or returned the check, there is no in-flight ACH
         // to cancel - the merchant should issue a normal refund instead.
         $gateway_status = strtolower( (string) $order->get_meta( '_hcwc_gateway_status' ) );
-        if ( $gateway_status && ! in_array( $gateway_status, array( 'pending', 'action_required', '' ), true ) ) {
+        if ( $gateway_status && ! in_array( $gateway_status, array( 'pending', 'action_required' ), true ) ) {
             hcwc_log( 'Cancel-void: order #' . $order_id . ' skipped - gateway_status=' . $gateway_status . ' is past void window' );
             return;
         }
@@ -2136,8 +2138,15 @@ if ( ! function_exists( 'hcwc_void_ach_on_cancel' ) ) {
         }
 
         if ( ! hcwc_check_rate_limit( $api_key ) ) {
-            // Don't mark _hcwc_void_attempted - let the next sweep / manual cancel retry.
-            hcwc_log( 'Cancel-void: order #' . $order_id . ' rate limited, will retry on next opportunity' );
+            // The hook only fires on the on-hold -> cancelled transition, which
+            // already happened. There is no automatic retry path. Leave a note
+            // so the merchant knows to check the processor portal manually.
+            hcwc_log( 'Cancel-void: order #' . $order_id . ' rate limited; manual processor portal action required', 'warning' );
+            $order->add_order_note( sprintf(
+                '%s: ACH void on cancel was rate-limited and did not run. Verify in the eCheck processor portal that the payment was voided.',
+                kc_get_brand_name()
+            ) );
+            $order->save();
             return;
         }
 
@@ -2171,6 +2180,7 @@ if ( ! function_exists( 'hcwc_void_ach_on_cancel' ) ) {
                 kc_get_brand_name(),
                 sanitize_text_field( $msg )
             ) );
+            $order->save();
             return;
         }
 
@@ -2197,6 +2207,7 @@ if ( ! function_exists( 'hcwc_void_ach_on_cancel' ) ) {
                 $code,
                 $body_msg ? ' - ' . $body_msg : ''
             ) );
+            $order->save();
         }
     }
 }
