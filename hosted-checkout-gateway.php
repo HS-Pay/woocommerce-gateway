@@ -52,7 +52,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.3
+ * Version:     1.8.4
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -64,7 +64,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.3' );
+define( 'KC_WC_VERSION', '1.8.4' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -530,8 +530,15 @@ add_action( 'plugins_loaded', function() {
 
             $this->log( 'Starting polling for session: ' . $session_id );
 
+            // eCheck sessions are stamped paid+pending synchronously by
+            // platform-api during checkout submission, so a single fetch is
+            // sufficient at thank-you time. The previous 15-second poll loop
+            // was inherited from the card flow and added no value for ACH -
+            // there is no race condition to wait out. Card sessions can
+            // legitimately take a moment for the processor confirmation to
+            // land, so keep the short retry there.
             $poll_delays = ( $this->payment_type === 'echeck' )
-                ? array( 0, 1.0, 2.0, 3.0, 4.0, 5.0 )
+                ? array( 0 )
                 : array( 0, 0.5, 1.5, 3.0 );
             foreach ( $poll_delays as $attempt => $delay ) {
                 if ( $delay ) { 
