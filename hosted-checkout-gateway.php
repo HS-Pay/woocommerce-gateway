@@ -52,7 +52,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.0
+ * Version:     1.8.1
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -64,7 +64,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.0' );
+define( 'KC_WC_VERSION', '1.8.1' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -568,11 +568,15 @@ add_action( 'plugins_loaded', function() {
                             '%s: payment accepted by processor, awaiting bank verification (typically 2-3 business days). Do not ship until status updates.',
                             kc_get_brand_name()
                         ) );
+                        $order->update_meta_data( '_hcwc_gateway_set_wc_status', 'on-hold' );
                         $order->save();
                         return;
                     }
                     $this->log( 'Payment successful - Completing order' );
                     $order->payment_complete( $txn_id ?: '' );
+                    if ( $gateway_status ) {
+                        $order->update_meta_data( '_hcwc_gateway_set_wc_status', $order->get_status() );
+                    }
                     $order->add_order_note( kc_get_brand_name() . ': paid (verified via session).' );
                     $order->save();
                     return;
@@ -684,12 +688,16 @@ add_action( 'plugins_loaded', function() {
                             '%s: synced → payment accepted, awaiting bank verification.',
                             kc_get_brand_name()
                         ) );
+                        $order->update_meta_data( '_hcwc_gateway_set_wc_status', 'on-hold' );
                     } else {
                         $this->log( 'Manual sync: order already on-hold, gateway_status=' . $gateway_status );
                     }
                 } else {
                     $this->log( 'Payment confirmed - Completing order with status: ' . $status );
                     $order->payment_complete( $txn_id ?: '' );
+                    if ( $gateway_status ) {
+                        $order->update_meta_data( '_hcwc_gateway_set_wc_status', $order->get_status() );
+                    }
                     $order->add_order_note(kc_get_brand_name() . ': synced → marked paid.');
                 }
             } else {
@@ -1695,11 +1703,17 @@ if ( ! function_exists( 'hcwc_auto_sync_single_order' ) ) {
                             '%s: payment accepted, awaiting bank verification (auto-sync).',
                             kc_get_brand_name()
                         ) );
+                        $order->update_meta_data( '_hcwc_gateway_set_wc_status', 'on-hold' );
+                        $order->save();
                     }
                     hcwc_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' resolved to transaction ' . $txn_id . ' -> on-hold (ACH gateway_status=' . $gateway_status . ').' );
                 } else {
                     if ( ! $order->is_paid() ) {
                         $order->payment_complete( $txn_id );
+                        if ( $gateway_status ) {
+                            $order->update_meta_data( '_hcwc_gateway_set_wc_status', $order->get_status() );
+                            $order->save();
+                        }
                     }
                     hcwc_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' resolved to transaction ' . $txn_id . ' -> marked paid.' );
                 }
@@ -1836,6 +1850,16 @@ if ( ! function_exists( 'hcwc_sync_gateway_status_for_order' ) ) {
         $txn_id = $order->get_meta( '_hcwc_payment_id' );
         if ( ! $txn_id ) { return; }
 
+        // Respect merchant overrides: if the current WC status differs from the
+        // last status this plugin set, a human has touched the order and we
+        // should not undo their decision.
+        $last_we_set   = $order->get_meta( '_hcwc_gateway_set_wc_status' );
+        $current_status = $order->get_status();
+        if ( $last_we_set && $last_we_set !== $current_status ) {
+            hcwc_log( 'Gateway sweep: order #' . $order->get_id() . ' skipped - merchant override detected (we set "' . $last_we_set . '", current is "' . $current_status . '")' );
+            return;
+        }
+
         $resp = wp_remote_get( trailingslashit( $api_base ) . 'transactions/' . rawurlencode( $txn_id ), array(
             'headers' => array( 'X-API-KEY' => $api_key ),
             'timeout' => 15,
@@ -1862,7 +1886,9 @@ if ( ! function_exists( 'hcwc_sync_gateway_status_for_order' ) ) {
 
         if ( $gateway_status === 'cleared' && ! $order->is_paid() ) {
             $order->payment_complete( $txn_id );
+            $order->update_meta_data( '_hcwc_gateway_set_wc_status', $order->get_status() );
             $order->add_order_note( sprintf( '%s: bank verified payment - moved from on-hold to processing.', kc_get_brand_name() ) );
+            $order->save();
             hcwc_log( 'Gateway sweep: order #' . $order->get_id() . ' cleared -> payment_complete' );
         } elseif ( in_array( $gateway_status, array( 'returned', 'action_required', 'cancelled' ), true ) && ! $order->has_status( 'failed' ) ) {
             $reason = '';
@@ -1873,6 +1899,8 @@ if ( ! function_exists( 'hcwc_sync_gateway_status_for_order' ) ) {
             }
             $note = trim( sprintf( '%s: payment %s. %s', kc_get_brand_name(), str_replace( '_', ' ', $gateway_status ), $reason ) );
             $order->update_status( 'failed', $note );
+            $order->update_meta_data( '_hcwc_gateway_set_wc_status', 'failed' );
+            $order->save();
             hcwc_log( 'Gateway sweep: order #' . $order->get_id() . ' ' . $gateway_status . ' -> failed' );
         } else {
             $order->save();
