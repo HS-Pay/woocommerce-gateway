@@ -52,7 +52,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.1
+ * Version:     1.8.2
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -64,7 +64,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.1' );
+define( 'KC_WC_VERSION', '1.8.2' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -1850,6 +1850,13 @@ if ( ! function_exists( 'hcwc_sync_gateway_status_for_order' ) ) {
         $txn_id = $order->get_meta( '_hcwc_payment_id' );
         if ( ! $txn_id ) { return; }
 
+        // Defensive belt-and-braces: never touch terminal-state orders even if
+        // the sweep query is ever broadened. Mirrors the official Green Money
+        // plugin's allow-list bail-out.
+        if ( $order->has_status( array( 'completed', 'failed', 'refunded', 'cancelled' ) ) ) {
+            return;
+        }
+
         // Respect merchant overrides: if the current WC status differs from the
         // last status this plugin set, a human has touched the order and we
         // should not undo their decision.
@@ -1897,7 +1904,20 @@ if ( ! function_exists( 'hcwc_sync_gateway_status_for_order' ) ) {
             } elseif ( $gateway_status === 'action_required' && ! empty( $tx['gatewayVerifyDescription'] ) ) {
                 $reason = $tx['gatewayVerifyDescription'];
             }
-            $note = trim( sprintf( '%s: payment %s. %s', kc_get_brand_name(), str_replace( '_', ' ', $gateway_status ), $reason ) );
+            $remediation = '';
+            if ( $gateway_status === 'action_required' ) {
+                $remediation = 'Log into your eCheck processor portal to review and resolve, or contact the customer for a different payment method.';
+            } elseif ( $gateway_status === 'returned' ) {
+                $remediation = 'The customer\'s bank returned the payment. Contact the customer for a different payment method.';
+            } elseif ( $gateway_status === 'cancelled' ) {
+                $remediation = 'This payment was voided in the eCheck processor portal.';
+            }
+            $parts = array_filter( array(
+                sprintf( '%s: payment %s.', kc_get_brand_name(), str_replace( '_', ' ', $gateway_status ) ),
+                $reason ? 'Reason: ' . $reason : '',
+                $remediation ? 'Next step: ' . $remediation : '',
+            ) );
+            $note = implode( ' ', $parts );
             $order->update_status( 'failed', $note );
             $order->update_meta_data( '_hcwc_gateway_set_wc_status', 'failed' );
             $order->save();
