@@ -52,7 +52,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.2
+ * Version:     1.8.3
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -64,7 +64,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.2' );
+define( 'KC_WC_VERSION', '1.8.3' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -493,6 +493,18 @@ add_action( 'plugins_loaded', function() {
             // Ensure we have the session id (meta or ?sessionID= on the return URL)
             $session_id = $order->get_meta( '_hcwc_session_id' );
             if ( ! $session_id && isset( $_GET['sessionID'] ) ) {
+                // process_payment writes _hcwc_session_id to meta synchronously
+                // during checkout. If it's still empty 10+ minutes after the order
+                // was created, the legitimate path failed and accepting a URL
+                // value here would let a buyer attach a different session to
+                // this order. Refuse the fallback past that window.
+                $created = $order->get_date_created();
+                $age_seconds = $created ? ( time() - $created->getTimestamp() ) : 0;
+                if ( $age_seconds > 600 ) {
+                    $this->log( 'Refusing URL sessionID fallback on capture-return: order is ' . $age_seconds . 's old', 'warning' );
+                    $order->add_order_note( kc_get_brand_name() . ': blocked URL session ID after capture window expired.' );
+                    return;
+                }
                 $session_id = sanitize_text_field( wp_unslash( $_GET['sessionID'] ) );
                 // Validate session ID format (basic check for expected format)
                 if ( ! preg_match( '/^[a-zA-Z0-9_-]+$/', $session_id ) ) {
@@ -506,6 +518,7 @@ add_action( 'plugins_loaded', function() {
                     return;
                 }
                 $order->update_meta_data( '_hcwc_session_id', $session_id );
+                $order->save();
                 $this->log( 'Session ID obtained from URL parameter: ' . $session_id );
             }
             
@@ -557,26 +570,28 @@ add_action( 'plugins_loaded', function() {
                 }
 
                 if ( in_array( $status, array( 'paid', 'succeeded' ), true ) ) {
-                    $gateway_status = isset( $txn['gatewayStatus'] ) ? strtolower( $txn['gatewayStatus'] ) : null;
-                    if ( $gateway_status ) {
-                        $order->update_meta_data( '_hcwc_gateway_status', $gateway_status );
-                        $order->update_meta_data( '_hcwc_gateway_status_checked_at', gmdate( 'c' ) );
-                    }
-                    if ( $gateway_status && $gateway_status !== 'cleared' ) {
-                        $this->log( 'ACH payment accepted, awaiting bank verification - holding order (gateway_status=' . $gateway_status . ')' );
-                        $order->update_status( 'on-hold', sprintf(
-                            '%s: payment accepted by processor, awaiting bank verification (typically 2-3 business days). Do not ship until status updates.',
-                            kc_get_brand_name()
+                    // Verify processor amount matches the order total before any capture.
+                    if ( ! hcwc_amount_matches_order( $order, is_array( $txn ) ? $txn : array() ) ) {
+                        $api_amount = isset( $txn['amount'] ) ? $txn['amount'] : '';
+                        $this->log( 'Capture blocked - amount mismatch (order=' . $order->get_total() . ', api=' . $api_amount . ')', 'error' );
+                        $order->add_order_note( sprintf(
+                            '%s: capture blocked - amount mismatch (order: %s, processor: %s).',
+                            kc_get_brand_name(),
+                            $order->get_total(),
+                            $api_amount
                         ) );
-                        $order->update_meta_data( '_hcwc_gateway_set_wc_status', 'on-hold' );
                         $order->save();
                         return;
                     }
+                    $gateway_status = isset( $txn['gatewayStatus'] ) ? strtolower( $txn['gatewayStatus'] ) : null;
+                    if ( $gateway_status ) {
+                        // ACH path - apply via shared helper. Handles cleared/pending/failed mappings.
+                        hcwc_apply_gateway_status_to_order( $order, $gateway_status, is_array( $txn ) ? $txn : array(), $txn_id ?: '', 'capture-return' );
+                        return;
+                    }
+                    // Card path - no gatewayStatus on response, complete normally.
                     $this->log( 'Payment successful - Completing order' );
                     $order->payment_complete( $txn_id ?: '' );
-                    if ( $gateway_status ) {
-                        $order->update_meta_data( '_hcwc_gateway_set_wc_status', $order->get_status() );
-                    }
                     $order->add_order_note( kc_get_brand_name() . ': paid (verified via session).' );
                     $order->save();
                     return;
@@ -615,6 +630,18 @@ add_action( 'plugins_loaded', function() {
             // 1) Ensure we know the session id
             $session_id = $order->get_meta('_hcwc_session_id');
             if ( ! $session_id && isset($_GET['sessionID']) ) {
+                // Reject URL-supplied session ID on stale orders. process_payment
+                // writes _hcwc_session_id to meta synchronously during checkout;
+                // if it's still empty 10+ minutes later, the legitimate path failed
+                // and accepting a URL value here would let a buyer attach somebody
+                // else's session to this order.
+                $created = $order->get_date_created();
+                $age_seconds = $created ? ( time() - $created->getTimestamp() ) : 0;
+                if ( $age_seconds > 600 ) {
+                    $this->log( 'Refusing URL sessionID fallback: order is ' . $age_seconds . 's old', 'warning' );
+                    $order->add_order_note( kc_get_brand_name() . ': blocked URL session ID after capture window expired.' );
+                    return;
+                }
                 $session_id = sanitize_text_field( wp_unslash($_GET['sessionID']) );
                 // Validate session ID format
                 if ( ! preg_match( '/^[a-zA-Z0-9_-]+$/', $session_id ) ) {
@@ -628,6 +655,7 @@ add_action( 'plugins_loaded', function() {
                     return;
                 }
                 $order->update_meta_data('_hcwc_session_id', $session_id);
+                $order->save();
                 $this->log( 'Session ID obtained from URL parameter: ' . $session_id );
             }
 
@@ -655,7 +683,7 @@ add_action( 'plugins_loaded', function() {
                 // If your API uses paymentIntent as the canonical tx id (you showed it null earlier, so likely not)
                 $txn_id = $session['paymentIntent'];
             }
-            if ( ! $txn_id && ! empty($session['_id ']) ) {
+            if ( ! $txn_id && ! empty($session['_id']) ) {
                 // Sometimes there's a way to filter by session: /transactions?sessionId=/
                 $r2 = $this->request('GET', 'transactions?sessionId=' . rawurlencode($session['_id']));
                 $list = $r2['body']['data']['transactions'] ?? $r2['body']['data'] ?? array();
@@ -676,32 +704,30 @@ add_action( 'plugins_loaded', function() {
             }
             $status = strtolower( $session['paymentStatus'] ?? '' );
             $gateway_status = isset( $tx['gatewayStatus'] ) ? strtolower( $tx['gatewayStatus'] ) : null;
-            if ( $gateway_status ) {
-                $order->update_meta_data( '_hcwc_gateway_status', $gateway_status );
-                $order->update_meta_data( '_hcwc_gateway_status_checked_at', gmdate( 'c' ) );
-            }
             if ( in_array($status, array('paid','succeeded'), true) && ! $order->has_status(array('processing','completed')) ) {
-                if ( $gateway_status && $gateway_status !== 'cleared' ) {
-                    if ( ! $order->has_status( 'on-hold' ) ) {
-                        $this->log( 'Manual sync: ACH payment accepted, holding order (gateway_status=' . $gateway_status . ')' );
-                        $order->update_status( 'on-hold', sprintf(
-                            '%s: synced → payment accepted, awaiting bank verification.',
-                            kc_get_brand_name()
-                        ) );
-                        $order->update_meta_data( '_hcwc_gateway_set_wc_status', 'on-hold' );
-                    } else {
-                        $this->log( 'Manual sync: order already on-hold, gateway_status=' . $gateway_status );
-                    }
+                if ( ! hcwc_amount_matches_order( $order, is_array( $tx ) ? $tx : array() ) ) {
+                    $api_amount = isset( $tx['amount'] ) ? $tx['amount'] : '';
+                    $this->log( 'Manual sync: capture blocked - amount mismatch (order=' . $order->get_total() . ', api=' . $api_amount . ')', 'error' );
+                    $order->add_order_note( sprintf(
+                        '%s: capture blocked - amount mismatch (order: %s, processor: %s).',
+                        kc_get_brand_name(), $order->get_total(), $api_amount
+                    ) );
+                    $order->save();
+                } elseif ( $gateway_status ) {
+                    hcwc_apply_gateway_status_to_order( $order, $gateway_status, is_array( $tx ) ? $tx : array(), $txn_id ?: '', 'manual-sync' );
                 } else {
                     $this->log( 'Payment confirmed - Completing order with status: ' . $status );
                     $order->payment_complete( $txn_id ?: '' );
-                    if ( $gateway_status ) {
-                        $order->update_meta_data( '_hcwc_gateway_set_wc_status', $order->get_status() );
-                    }
-                    $order->add_order_note(kc_get_brand_name() . ': synced → marked paid.');
+                    $order->add_order_note( kc_get_brand_name() . ': synced → marked paid.' );
                 }
             } else {
                 $this->log( 'Payment status: ' . ( $status ?: 'none' ) . ', Order status: ' . $order->get_status() );
+                if ( $gateway_status ) {
+                    // Still update meta even when not transitioning, so the sweep guard sees the latest known status.
+                    $order->update_meta_data( '_hcwc_gateway_status', $gateway_status );
+                    $order->update_meta_data( '_hcwc_gateway_status_checked_at', gmdate( 'c' ) );
+                    $order->save();
+                }
             }
 
             // 4) Sync refunds
@@ -914,19 +940,12 @@ add_action( 'plugins_loaded', function() {
 
             $this->log( 'API payload prepared - Amount: ' . $order_total . ', Items: ' . count( $line_items ) . ' (products: ' . count( $order->get_items() ) . ', coupons: ' . count( $order->get_coupons() ) . ')' );
 
-            // Idempotency key recommended
-            add_filter( 'http_request_args', function( $args, $url ) {
-                if ( ! isset( $args['headers']['Idempotency-Key'] ) ) {
-                    $args['headers']['Idempotency-Key'] = wp_generate_uuid4();
-                }
-                return $args;
-            }, 10, 2 );
-
-            // Create hosted checkout session
+            // Create hosted checkout session with a stable per-order idempotency key
+            // so a network retry of the same order does not create a duplicate session.
             $idk = 'create_' . $order->get_id() . '_' . wp_generate_uuid4();
             $this->log( 'Making API request to create checkout session for order #' . $order_id );
 
-            $res = $this->request( 'POST', 'checkout/sessions/create', $payload );
+            $res = $this->request( 'POST', 'checkout/sessions/create', $payload, $idk );
             $code = $res['code']; $body = $res['body'];
 
             $this->log( 'API response received - Code: ' . $code . ', Has paymentURL: ' . ( ! empty( $body['data']['paymentURL'] ) ? 'yes' : 'no' ) );
@@ -1150,10 +1169,13 @@ add_action( 'plugins_loaded', function() {
                 return false;
             }
             
-            // For AJAX requests, verify nonce
-            if ( wp_doing_ajax() && ! empty( $_POST['security'] ) ) {
-                if ( ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['security'] ) ), $action ) ) {
-                    $this->log( 'Security: Invalid nonce for ' . $action, 'warning' );
+            // For AJAX requests, verify nonce unconditionally. The previous logic
+            // only verified if $_POST['security'] was non-empty, which silently
+            // fell open if a caller omitted the field.
+            if ( wp_doing_ajax() ) {
+                $nonce = isset( $_POST['security'] ) ? sanitize_text_field( wp_unslash( $_POST['security'] ) ) : '';
+                if ( empty( $nonce ) || ! wp_verify_nonce( $nonce, $action ) ) {
+                    $this->log( 'Security: Invalid or missing nonce for ' . $action, 'warning' );
                     return false;
                 }
             }
@@ -1617,7 +1639,7 @@ if ( ! function_exists( 'hcwc_batch_auto_sync_orders' ) ) {
             foreach ( $orders as $order ) {
                 $oid = $order->get_id();
                 // Use WooCommerce order methods for HPOS compatibility
-                $has_txn_id = $order->get_meta( '_hcwc_transaction_id' ) || $order->get_meta( '_hcwc_payment_id' );
+                $has_txn_id = (bool) $order->get_meta( '_hcwc_payment_id' );
                 $session_id = $order->get_meta( '_hcwc_session_id' );
                 
                 hcwc_log( 'Auto-sync: evaluating order #' . $oid . ' - has_txn_id: ' . ( $has_txn_id ? 'yes' : 'no' ) . ', session_id: ' . ( $session_id ? substr( $session_id, 0, 8 ) . '...' : 'none' ) );
@@ -1667,60 +1689,59 @@ if ( ! function_exists( 'hcwc_auto_sync_single_order' ) ) {
 
         hcwc_log( 'Auto-sync: checking order #' . $order->get_id() . ' session ' . $session_id );
 
+        if ( ! hcwc_check_rate_limit( $api_key ) ) {
+            return;
+        }
+
         $api_base = kc_get_api_url();
-        $resp = wp_remote_get( "{$api_base}/checkout/sessions/$session_id", array(
+        $resp = wp_remote_get( trailingslashit( $api_base ) . 'checkout/sessions/' . rawurlencode( $session_id ), array(
             'headers' => array( 'X-API-KEY' => $api_key ),
             'timeout' => 15,
         ) );
-        if ( is_wp_error( $resp ) ) return;
+        if ( is_wp_error( $resp ) ) {
+            hcwc_log( 'Auto-sync: order #' . $order->get_id() . ' API error: ' . $resp->get_error_message(), 'warning' );
+            return;
+        }
         $body = json_decode( wp_remote_retrieve_body( $resp ), true );
         if ( ! is_array( $body ) ) return;
-        
+
         // Parse response structure like the manual sync does
         $sess = $body['data']['session'] ?? array();
         $txn = $body['data']['transaction'] ?? array();
-        
+
         $status = strtolower( $sess['paymentStatus'] ?? '' );
         $txn_id = $txn['_id'] ?? '';
-        
+
         hcwc_log( 'Auto-sync: API response - Status: ' . ( $status ?: 'none' ) . ', Transaction ID: ' . ( $txn_id ?: 'none' ) );
 
         if ( in_array( $status, array( 'paid','succeeded' ), true ) ) {
             if ( $txn_id ) {
-                $order->update_meta_data( '_hcwc_transaction_id', $txn_id );
-                $order->update_meta_data( '_hcwc_payment_id', $txn_id ); // Also save as payment_id for consistency
+                if ( ! hcwc_amount_matches_order( $order, is_array( $txn ) ? $txn : array() ) ) {
+                    $api_amount = isset( $txn['amount'] ) ? $txn['amount'] : '';
+                    hcwc_log( 'Auto-sync: capture blocked - amount mismatch (order=' . $order->get_total() . ', api=' . $api_amount . ')', 'error' );
+                    $order->add_order_note( sprintf(
+                        '%s: capture blocked - amount mismatch (order: %s, processor: %s).',
+                        kc_get_brand_name(), $order->get_total(), $api_amount
+                    ) );
+                    $order->save();
+                    return;
+                }
+                $order->update_meta_data( '_hcwc_payment_id', sanitize_text_field( $txn_id ) );
+                $order->save();
 
                 $gateway_status = isset( $txn['gatewayStatus'] ) ? strtolower( $txn['gatewayStatus'] ) : null;
                 if ( $gateway_status ) {
-                    $order->update_meta_data( '_hcwc_gateway_status', $gateway_status );
-                    $order->update_meta_data( '_hcwc_gateway_status_checked_at', gmdate( 'c' ) );
-                }
-                $order->save();
-
-                if ( $gateway_status && $gateway_status !== 'cleared' ) {
-                    if ( ! $order->has_status( 'on-hold' ) ) {
-                        $order->update_status( 'on-hold', sprintf(
-                            '%s: payment accepted, awaiting bank verification (auto-sync).',
-                            kc_get_brand_name()
-                        ) );
-                        $order->update_meta_data( '_hcwc_gateway_set_wc_status', 'on-hold' );
-                        $order->save();
-                    }
-                    hcwc_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' resolved to transaction ' . $txn_id . ' -> on-hold (ACH gateway_status=' . $gateway_status . ').' );
+                    hcwc_apply_gateway_status_to_order( $order, $gateway_status, is_array( $txn ) ? $txn : array(), $txn_id, 'auto-sync' );
                 } else {
                     if ( ! $order->is_paid() ) {
                         $order->payment_complete( $txn_id );
-                        if ( $gateway_status ) {
-                            $order->update_meta_data( '_hcwc_gateway_set_wc_status', $order->get_status() );
-                            $order->save();
-                        }
                     }
-                    hcwc_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' resolved to transaction ' . $txn_id . ' -> marked paid.' );
+                    hcwc_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' -> marked paid (card path).' );
                 }
             } else {
                 hcwc_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' shows paid status but no transaction ID - keeping pending until transaction appears.' );
             }
-        } elseif ( in_array( $status, array( 'failed','canceled' ), true ) ) {
+        } elseif ( in_array( $status, array( 'failed','canceled','cancelled' ), true ) ) {
             if ( ! $order->has_status( 'failed' ) ) {
                 $order->update_status( 'failed', kc_get_brand_name() . ' reported failure (auto sync)' );
             }
@@ -1845,6 +1866,141 @@ if ( ! function_exists( 'hcwc_run_gateway_status_sweep' ) ) {
     }
 }
 
+/**
+ * Apply a gatewayStatus value (from platform-api) to a WooCommerce order.
+ *
+ * Single source of truth for the gatewayStatus -> WC status mapping used
+ * across all payment touchpoints (post-redirect polling, manual sync,
+ * auto-sync by session, and the recurring sweep). Centralizing prevents
+ * the four sites from drifting in copy, branching logic, or invariants.
+ *
+ * Status mapping:
+ *   cleared                                  -> payment_complete (processing/completed)
+ *   action_required | returned | cancelled   -> failed (with reject reason if known)
+ *   pending (or any other state)             -> on-hold
+ *
+ * Tracking meta written every call:
+ *   _hcwc_gateway_status
+ *   _hcwc_gateway_status_checked_at
+ *
+ * Tracking meta written on actual WC status change (consumed by the sweep
+ * to detect merchant overrides):
+ *   _hcwc_gateway_set_wc_status
+ *
+ * Reason fields from the API response (gatewayRejectReason /
+ * gatewayVerifyDescription) are passed through sanitize_text_field() before
+ * landing in order notes to defend against XSS if a downstream processor
+ * ever returns HTML.
+ */
+if ( ! function_exists( 'hcwc_apply_gateway_status_to_order' ) ) {
+    function hcwc_apply_gateway_status_to_order( WC_Order $order, $gateway_status, array $tx, $txn_id = '', $context = '' ) {
+        $gateway_status = strtolower( (string) $gateway_status );
+        if ( ! $gateway_status ) {
+            return false;
+        }
+
+        $order->update_meta_data( '_hcwc_gateway_status', $gateway_status );
+        $order->update_meta_data( '_hcwc_gateway_status_checked_at', gmdate( 'c' ) );
+
+        $changed = false;
+
+        if ( $gateway_status === 'cleared' ) {
+            if ( ! $order->is_paid() ) {
+                $order->payment_complete( $txn_id );
+                $order->update_meta_data( '_hcwc_gateway_set_wc_status', $order->get_status() );
+                $note = $context === 'sweep'
+                    ? sprintf( '%s: bank verified payment - moved from on-hold to processing.', kc_get_brand_name() )
+                    : sprintf( '%s: paid (verified via session).', kc_get_brand_name() );
+                $order->add_order_note( $note );
+                $changed = true;
+            }
+        } elseif ( in_array( $gateway_status, array( 'returned', 'action_required', 'cancelled' ), true ) ) {
+            if ( ! $order->has_status( array( 'failed', 'refunded', 'cancelled' ) ) ) {
+                $reason = '';
+                if ( $gateway_status === 'returned' && ! empty( $tx['gatewayRejectReason'] ) ) {
+                    $reason = sanitize_text_field( $tx['gatewayRejectReason'] );
+                } elseif ( $gateway_status === 'action_required' && ! empty( $tx['gatewayVerifyDescription'] ) ) {
+                    $reason = sanitize_text_field( $tx['gatewayVerifyDescription'] );
+                }
+                $remediation = '';
+                if ( $gateway_status === 'action_required' ) {
+                    $remediation = 'Log into your eCheck processor portal to review and resolve, or contact the customer for a different payment method.';
+                } elseif ( $gateway_status === 'returned' ) {
+                    $remediation = 'The customer\'s bank returned the payment. Contact the customer for a different payment method.';
+                } elseif ( $gateway_status === 'cancelled' ) {
+                    $remediation = 'This payment was voided in the eCheck processor portal.';
+                }
+                $parts = array_filter( array(
+                    sprintf( '%s: payment %s.', kc_get_brand_name(), str_replace( '_', ' ', $gateway_status ) ),
+                    $reason ? 'Reason: ' . $reason : '',
+                    $remediation ? 'Next step: ' . $remediation : '',
+                ) );
+                $order->update_status( 'failed', implode( ' ', $parts ) );
+                $order->update_meta_data( '_hcwc_gateway_set_wc_status', 'failed' );
+                $changed = true;
+            }
+        } else {
+            // pending or any unknown value - default to on-hold so the merchant
+            // sees the order before shipping. The sweep will advance it later.
+            if ( ! $order->has_status( array( 'on-hold', 'processing', 'completed', 'failed', 'refunded', 'cancelled' ) ) ) {
+                $order->update_status( 'on-hold', sprintf(
+                    '%s: payment accepted by processor, awaiting bank verification (typically 2-3 business days). Do not ship until status updates.',
+                    kc_get_brand_name()
+                ) );
+                $order->update_meta_data( '_hcwc_gateway_set_wc_status', 'on-hold' );
+                $changed = true;
+            }
+        }
+
+        $order->save();
+
+        if ( $changed ) {
+            hcwc_log( 'Gateway status applied: order #' . $order->get_id() . ' -> ' . $gateway_status . ( $context ? ' (' . $context . ')' : '' ) );
+        }
+
+        return $changed;
+    }
+}
+
+/**
+ * Apply the gateway's transient-based rate limit to standalone HTTP calls
+ * (auto-sync and sweep) that don't go through WC_Gateway_HCWC::request().
+ * Same window (60s) and threshold (100 req/min) as the class method.
+ *
+ * Returns true if the request may proceed; false if rate-limited.
+ */
+if ( ! function_exists( 'hcwc_check_rate_limit' ) ) {
+    function hcwc_check_rate_limit( $api_key ) {
+        if ( empty( $api_key ) ) { return true; }
+        $key = 'hcwc_api_requests_' . md5( $api_key );
+        $current = get_transient( $key );
+        if ( $current === false ) {
+            set_transient( $key, 1, 60 );
+            return true;
+        }
+        if ( intval( $current ) >= 100 ) {
+            hcwc_log( 'Rate limit exceeded (standalone API call): skipping', 'warning' );
+            return false;
+        }
+        set_transient( $key, intval( $current ) + 1, 60 );
+        return true;
+    }
+}
+
+/**
+ * Verify a transaction's amount matches the WC order total within a
+ * 1-cent tolerance. Returns true if amounts match or if the API didn't
+ * provide an amount (we don't block on missing data — only on disagreement).
+ */
+if ( ! function_exists( 'hcwc_amount_matches_order' ) ) {
+    function hcwc_amount_matches_order( WC_Order $order, array $tx ) {
+        if ( ! isset( $tx['amount'] ) || ! is_numeric( $tx['amount'] ) ) {
+            return true;
+        }
+        return abs( floatval( $tx['amount'] ) - floatval( $order->get_total() ) ) <= 0.01;
+    }
+}
+
 if ( ! function_exists( 'hcwc_sync_gateway_status_for_order' ) ) {
     function hcwc_sync_gateway_status_for_order( WC_Order $order, $api_base, $api_key ) {
         $txn_id = $order->get_meta( '_hcwc_payment_id' );
@@ -1864,6 +2020,10 @@ if ( ! function_exists( 'hcwc_sync_gateway_status_for_order' ) ) {
         $current_status = $order->get_status();
         if ( $last_we_set && $last_we_set !== $current_status ) {
             hcwc_log( 'Gateway sweep: order #' . $order->get_id() . ' skipped - merchant override detected (we set "' . $last_we_set . '", current is "' . $current_status . '")' );
+            return;
+        }
+
+        if ( ! hcwc_check_rate_limit( $api_key ) ) {
             return;
         }
 
@@ -1888,45 +2048,10 @@ if ( ! function_exists( 'hcwc_sync_gateway_status_for_order' ) ) {
         }
 
         $prev = $order->get_meta( '_hcwc_gateway_status' );
-        $order->update_meta_data( '_hcwc_gateway_status', $gateway_status );
-        $order->update_meta_data( '_hcwc_gateway_status_checked_at', gmdate( 'c' ) );
+        $changed = hcwc_apply_gateway_status_to_order( $order, $gateway_status, $tx, $txn_id, 'sweep' );
 
-        if ( $gateway_status === 'cleared' && ! $order->is_paid() ) {
-            $order->payment_complete( $txn_id );
-            $order->update_meta_data( '_hcwc_gateway_set_wc_status', $order->get_status() );
-            $order->add_order_note( sprintf( '%s: bank verified payment - moved from on-hold to processing.', kc_get_brand_name() ) );
-            $order->save();
-            hcwc_log( 'Gateway sweep: order #' . $order->get_id() . ' cleared -> payment_complete' );
-        } elseif ( in_array( $gateway_status, array( 'returned', 'action_required', 'cancelled' ), true ) && ! $order->has_status( 'failed' ) ) {
-            $reason = '';
-            if ( $gateway_status === 'returned' && ! empty( $tx['gatewayRejectReason'] ) ) {
-                $reason = $tx['gatewayRejectReason'];
-            } elseif ( $gateway_status === 'action_required' && ! empty( $tx['gatewayVerifyDescription'] ) ) {
-                $reason = $tx['gatewayVerifyDescription'];
-            }
-            $remediation = '';
-            if ( $gateway_status === 'action_required' ) {
-                $remediation = 'Log into your eCheck processor portal to review and resolve, or contact the customer for a different payment method.';
-            } elseif ( $gateway_status === 'returned' ) {
-                $remediation = 'The customer\'s bank returned the payment. Contact the customer for a different payment method.';
-            } elseif ( $gateway_status === 'cancelled' ) {
-                $remediation = 'This payment was voided in the eCheck processor portal.';
-            }
-            $parts = array_filter( array(
-                sprintf( '%s: payment %s.', kc_get_brand_name(), str_replace( '_', ' ', $gateway_status ) ),
-                $reason ? 'Reason: ' . $reason : '',
-                $remediation ? 'Next step: ' . $remediation : '',
-            ) );
-            $note = implode( ' ', $parts );
-            $order->update_status( 'failed', $note );
-            $order->update_meta_data( '_hcwc_gateway_set_wc_status', 'failed' );
-            $order->save();
-            hcwc_log( 'Gateway sweep: order #' . $order->get_id() . ' ' . $gateway_status . ' -> failed' );
-        } else {
-            $order->save();
-            if ( $prev !== $gateway_status ) {
-                hcwc_log( 'Gateway sweep: order #' . $order->get_id() . ' status ' . ( $prev ?: 'unknown' ) . ' -> ' . $gateway_status . ' (still on-hold)' );
-            }
+        if ( ! $changed && $prev !== $gateway_status ) {
+            hcwc_log( 'Gateway sweep: order #' . $order->get_id() . ' status ' . ( $prev ?: 'unknown' ) . ' -> ' . $gateway_status . ' (no WC transition)' );
         }
     }
 }
