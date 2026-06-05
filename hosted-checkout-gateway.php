@@ -52,7 +52,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.6
+ * Version:     1.8.7
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -64,7 +64,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.6' );
+define( 'KC_WC_VERSION', '1.8.7' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -493,11 +493,7 @@ add_action( 'plugins_loaded', function() {
             // Ensure we have the session id (meta or ?sessionID= on the return URL)
             $session_id = $order->get_meta( '_hcwc_session_id' );
             if ( ! $session_id && isset( $_GET['sessionID'] ) ) {
-                // process_payment writes _hcwc_session_id to meta synchronously
-                // during checkout. If it's still empty 10+ minutes after the order
-                // was created, the legitimate path failed and accepting a URL
-                // value here would let a buyer attach a different session to
-                // this order. Refuse the fallback past that window.
+                // Only accept the URL fallback within a short window after order creation.
                 $created = $order->get_date_created();
                 $age_seconds = $created ? ( time() - $created->getTimestamp() ) : 0;
                 if ( $age_seconds > 600 ) {
@@ -530,13 +526,8 @@ add_action( 'plugins_loaded', function() {
 
             $this->log( 'Starting polling for session: ' . $session_id );
 
-            // eCheck sessions are stamped paid+pending synchronously by
-            // platform-api during checkout submission, so a single fetch is
-            // sufficient at thank-you time. The previous 15-second poll loop
-            // was inherited from the card flow and added no value for ACH -
-            // there is no race condition to wait out. Card sessions can
-            // legitimately take a moment for the processor confirmation to
-            // land, so keep the short retry there.
+            // eCheck only needs a single fetch at thank-you time; card may need
+            // a short retry while the processor confirmation lands.
             $poll_delays = ( $this->payment_type === 'echeck' )
                 ? array( 0 )
                 : array( 0, 0.5, 1.5, 3.0 );
@@ -637,11 +628,7 @@ add_action( 'plugins_loaded', function() {
             // 1) Ensure we know the session id
             $session_id = $order->get_meta('_hcwc_session_id');
             if ( ! $session_id && isset($_GET['sessionID']) ) {
-                // Reject URL-supplied session ID on stale orders. process_payment
-                // writes _hcwc_session_id to meta synchronously during checkout;
-                // if it's still empty 10+ minutes later, the legitimate path failed
-                // and accepting a URL value here would let a buyer attach somebody
-                // else's session to this order.
+                // Only accept the URL fallback within a short window after order creation.
                 $created = $order->get_date_created();
                 $age_seconds = $created ? ( time() - $created->getTimestamp() ) : 0;
                 if ( $age_seconds > 600 ) {
@@ -947,11 +934,7 @@ add_action( 'plugins_loaded', function() {
 
             $this->log( 'API payload prepared - Amount: ' . $order_total . ', Items: ' . count( $line_items ) . ' (products: ' . count( $order->get_items() ) . ', coupons: ' . count( $order->get_coupons() ) . ')' );
 
-            // Create hosted checkout session with a deterministic per-order
-            // idempotency key. A WooCommerce retry of process_payment for the
-            // same order (network blip, customer re-submit) must hit the same
-            // key so platform-api can deduplicate. Including the order key
-            // makes the value unguessable from the order id alone.
+            // Per-order idempotency key for the session-create call.
             $idk = 'create_' . $order->get_id() . '_' . md5( $order->get_order_key() );
             $this->log( 'Making API request to create checkout session for order #' . $order_id );
 
@@ -1065,39 +1048,15 @@ add_action( 'plugins_loaded', function() {
             $this->log( 'Refund amount validation (formatted) - Order total: ' . $order_total . ', Already refunded: ' . $already_refunded . ', Remaining: ' . $refund_amount );
             $this->log( 'Refund amount validation (raw) - Order total: ' . $order->get_total() . ', Already refunded: ' . $order->get_total_refunded() . ', Requested raw: ' . $amount );
 
-            // Use a more generous tolerance (0.05) for floating point comparison and round both values
+            // $already_refunded already includes the WC_Order_Refund that
+            // WooCommerce created before calling process_refund(), so the
+            // correct cumulative ceiling is to compare total refunds against
+            // the order total directly. Small tolerance for floating point.
             $tolerance = 0.05;
-            $remaining_rounded = round( (float) $remaining_refundable, 2 );
-            $refund_rounded = round( (float) $refund_amount, 2 );
-            $difference = $refund_rounded - $remaining_rounded;
+            $this->log( 'Refund validation comparison - Cumulative: ' . $already_refunded . ', Order total: ' . $order_total . ', Tolerance: ' . $tolerance );
 
-            $this->log( 'Refund validation comparison - Remaining rounded: ' . $remaining_rounded . ', Refund rounded: ' . $refund_rounded . ', Difference: ' . $difference . ', Tolerance: ' . $tolerance );
-
-            // WooCommerce creates the WC_Order_Refund record BEFORE calling
-            // process_refund(), so $already_refunded here already includes the
-            // current refund's amount. That makes $remaining_refundable look
-            // smaller than it really is. Detect this case by checking whether
-            // the most recently-created refund record matches the amount we're
-            // about to send. If yes, the remaining-balance check would
-            // double-count and is safe to bypass; the absolute order-total
-            // ceiling below still applies. If no match, this is a genuine new
-            // refund and the standard check runs.
-            $current_refund_matches = false;
-            $latest_refund = ! empty( $existing_refunds ) ? reset( $existing_refunds ) : null;
-            if ( $latest_refund && abs( (float) $latest_refund->get_amount() - $refund_amount ) < 0.01 ) {
-                $current_refund_matches = true;
-            }
-
-            if ( $difference > $tolerance && ! $current_refund_matches ) {
-                $this->log( 'Refund validation failed: Amount (' . $refund_amount . ') exceeds remaining refundable amount (' . $remaining_refundable . ') by ' . $difference . ' (tolerance: ' . $tolerance . ')', 'error' );
-                return new WP_Error( 'invalid_refund_amount', 'Refund amount exceeds remaining refundable amount' );
-            }
-
-            // Absolute ceiling enforced even on retries: a refund must never
-            // exceed the order total. Both operands are rounded to 2 dp by
-            // wc_format_decimal earlier, so no rounding slack is needed.
-            if ( round( (float) $refund_amount, 2 ) > round( (float) $order_total, 2 ) ) {
-                $this->log( 'Refund validation failed: Amount (' . $refund_amount . ') exceeds order total (' . $order_total . ')', 'error' );
+            if ( round( (float) $already_refunded, 2 ) > round( (float) $order_total, 2 ) + $tolerance ) {
+                $this->log( 'Refund validation failed: cumulative refunds (' . $already_refunded . ') exceed order total (' . $order_total . ')', 'error' );
                 return new WP_Error( 'invalid_refund_amount', 'Refund amount exceeds order total' );
             }
 
@@ -1124,12 +1083,7 @@ add_action( 'plugins_loaded', function() {
             $endpoint = 'transactions/' . $payment_id . '/refund';
             $this->log( 'Making refund API request to endpoint: ' . $endpoint );
 
-            // Deterministic idempotency key: includes the current refund-record
-            // count so two distinct refunds of the same amount + reason get
-            // different keys. A retry of the *same* refund (network failure
-            // before WC could finalize the record) hits the same count since
-            // WC removes failed refund records, so the key remains stable
-            // across retries of the same operation.
+            // Per-refund idempotency key.
             $refund_seq = count( $existing_refunds );
             $refund_idk = 'refund_' . $order_id . '_' . $refund_seq . '_' . md5( number_format( (float) $refund_amount, 2, '.', '' ) . '|' . (string) $reason );
 
@@ -1187,9 +1141,7 @@ add_action( 'plugins_loaded', function() {
                 return false;
             }
             
-            // For AJAX requests, verify nonce unconditionally. The previous logic
-            // only verified if $_POST['security'] was non-empty, which silently
-            // fell open if a caller omitted the field.
+            // For AJAX requests, verify nonce unconditionally.
             if ( wp_doing_ajax() ) {
                 $nonce = isset( $_POST['security'] ) ? sanitize_text_field( wp_unslash( $_POST['security'] ) ) : '';
                 if ( empty( $nonce ) || ! wp_verify_nonce( $nonce, $action ) ) {
@@ -1905,10 +1857,8 @@ if ( ! function_exists( 'hcwc_run_gateway_status_sweep' ) ) {
  * to detect merchant overrides):
  *   _hcwc_gateway_set_wc_status
  *
- * Reason fields from the API response (gatewayRejectReason /
- * gatewayVerifyDescription) are passed through sanitize_text_field() before
- * landing in order notes to defend against XSS if a downstream processor
- * ever returns HTML.
+ * Reason fields from the API response are normalized via sanitize_text_field()
+ * before being written to order notes.
  */
 if ( ! function_exists( 'hcwc_apply_gateway_status_to_order' ) ) {
     function hcwc_apply_gateway_status_to_order( WC_Order $order, $gateway_status, array $tx, $txn_id = '', $context = '' ) {
@@ -2079,17 +2029,8 @@ if ( ! function_exists( 'hcwc_sync_gateway_status_for_order' ) ) {
 
 /**
  * Void an in-flight ACH payment when a merchant cancels a held order.
- *
- * Fires on the on-hold -> cancelled transition only. When a merchant cancels
- * an order whose ACH is still pending verification, the bank will otherwise
- * eventually clear the debit and we'd be holding funds on a cancelled order
- * (or producing a reject loop). platform-api's refund endpoint already routes
- * to GreenMoney's CancelCheck when the check has not yet been processed,
- * so calling refund here with the full order amount voids the payment cleanly.
- *
- * Idempotency: a meta flag (_hcwc_void_attempted) prevents a re-cancel from
- * firing the call again, and the API itself receives a deterministic
- * Idempotency-Key so a network retry within a single attempt is also safe.
+ * Fires on the on-hold -> cancelled transition; calls the refund endpoint
+ * with the full order amount.
  */
 add_action( 'woocommerce_order_status_on-hold_to_cancelled', 'hcwc_void_ach_on_cancel', 10, 2 );
 
@@ -2107,10 +2048,8 @@ if ( ! function_exists( 'hcwc_void_ach_on_cancel' ) ) {
             return;
         }
 
-        // Defense-in-depth: refuse to put unvalidated data in the URL path,
-        // matching the format check already used by process_refund. The meta
-        // value is normally a MongoDB ObjectId; anything else means corrupted
-        // state and should not be acted on.
+        // The meta value is normally a MongoDB ObjectId; anything else means
+        // corrupted state and should not be acted on.
         if ( ! preg_match( '/^[a-zA-Z0-9_-]+$/', $payment_id ) ) {
             hcwc_log( 'Cancel-void: order #' . $order_id . ' invalid payment_id format, skipping', 'warning' );
             return;
