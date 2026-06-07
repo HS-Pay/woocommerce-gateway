@@ -28,10 +28,37 @@ if ( ! function_exists( 'kc_get_brand_logo' ) ) {
         return ! empty( $cached['logo'] ) ? $cached['logo'] : '';
     }
 }
+if ( ! function_exists( 'kc_normalize_api_domain' ) ) {
+    /**
+     * Reduce a user-entered API domain to a bare host (with optional :port).
+     * Accepts a pasted full URL and trims scheme, path, query, leading www.,
+     * and trailing slashes. Preserves localhost / host.docker.internal (and
+     * their ports) for local development.
+     */
+    function kc_normalize_api_domain( $value ) {
+        $value = trim( (string) $value );
+        if ( $value === '' ) {
+            return '';
+        }
+        if ( strpos( $value, '://' ) !== false ) {
+            $parts = wp_parse_url( $value );
+            if ( ! empty( $parts['host'] ) ) {
+                $value = $parts['host'] . ( isset( $parts['port'] ) ? ':' . $parts['port'] : '' );
+            }
+        } else {
+            $value = preg_replace( '#[/?].*$#', '', $value );
+        }
+        $value = preg_replace( '#^www\.#i', '', $value );
+        return rtrim( $value, '/' );
+    }
+}
 if ( ! function_exists( 'kc_get_api_domain' ) ) {
     function kc_get_api_domain() {
         $settings = get_option( 'woocommerce_hcwc_settings', array() );
-        $domain = ! empty( $settings['api_domain'] ) ? $settings['api_domain'] : '';
+        $domain = kc_normalize_api_domain( ! empty( $settings['api_domain'] ) ? $settings['api_domain'] : '' );
+        if ( $domain === '' ) {
+            return '';
+        }
         if ( strpos( $domain, ':' ) !== false || strpos( $domain, 'localhost' ) === 0 || strpos( $domain, 'host.docker.internal' ) === 0 ) {
             return $domain;
         }
@@ -52,7 +79,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.7
+ * Version:     1.8.9
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -64,7 +91,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.7' );
+define( 'KC_WC_VERSION', '1.8.9' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -251,7 +278,7 @@ add_action( 'plugins_loaded', function() {
                     'title'       => __( 'API Domain', 'hcwc' ),
                     'type'        => 'text',
                     'default'     => '',
-                    'description' => __( 'Your payment platform domain provided by your payment provider (e.g. clickbrickco.com). This is NOT your store domain. Brand info and API URLs are derived from this. Required.', 'hcwc' ),
+                    'description' => __( 'Your payment platform domain provided by your payment provider (e.g. clickbrickco.com). Enter the domain only — do not include https:// or an "api." prefix. This is NOT your store domain. Brand info and API URLs are derived from this. Required.', 'hcwc' ),
                 ),
                 'store_domain' => array(
                     'title'       => __( 'Your Store Domain', 'hcwc' ),
@@ -321,6 +348,25 @@ add_action( 'plugins_loaded', function() {
             $saved = parent::process_admin_options();
 
             $this->init_settings();
+
+            // Normalize a pasted API domain so the derived API URL is well-formed
+            // regardless of how it was entered (full URL, trailing slash, etc.).
+            $stored = get_option( $this->get_option_key(), array() );
+            if ( isset( $stored['api_domain'] ) ) {
+                $normalized = kc_normalize_api_domain( $stored['api_domain'] );
+                if ( $normalized !== $stored['api_domain'] ) {
+                    $stored['api_domain'] = $normalized;
+                    update_option( $this->get_option_key(), $stored );
+                    $this->init_settings();
+                }
+                if ( $normalized !== '' && stripos( $normalized, 'api.' ) === 0 && class_exists( 'WC_Admin_Settings' ) ) {
+                    WC_Admin_Settings::add_error( sprintf(
+                        __( 'API Domain appears to include an "api." host (%s). Enter only the platform domain, e.g. clickbrickco.com — the API host is added automatically.', 'hcwc' ),
+                        $normalized
+                    ) );
+                }
+            }
+
             if ( 'yes' !== ( $this->settings['enabled'] ?? 'no' ) ) {
                 return $saved;
             }
@@ -374,7 +420,9 @@ add_action( 'plugins_loaded', function() {
         }
 
         protected function request( $method, $path, $body = null, $idempotency_key = null ) {
-            // Basic rate limiting check
+            // Best-effort local throttle to avoid hammering the API from a single
+            // store. The authoritative cap is enforced server-side; this is a
+            // courtesy limiter and does not need to be exact under concurrency.
             $rate_limit_key = 'hcwc_api_requests_' . md5( $this->secret_key );
             $current_count = get_transient( $rate_limit_key );
             if ( $current_count === false ) {
@@ -829,8 +877,7 @@ add_action( 'plugins_loaded', function() {
             // Input validation
             if ( ! is_numeric( $order_id ) || $order_id <= 0 ) {
                 $this->log( 'Payment failed: Invalid order ID format', 'error' );
-                wc_add_notice( __( 'Invalid order. Please try again.', 'hcwc' ), 'error' );
-                return array( 'result' => 'fail' );
+                throw new Exception( __( 'Invalid order. Please try again.', 'hcwc' ) );
             }
             
             $this->log( 'Starting payment process for order #' . $order_id );
@@ -838,8 +885,7 @@ add_action( 'plugins_loaded', function() {
             $order = wc_get_order( $order_id );
             if ( ! $order ) {
                 $this->log( 'Invalid order ID: ' . $order_id, 'error' );
-                wc_add_notice( __( 'Invalid order. Please try again.', 'hcwc' ), 'error' );
-                return array( 'result' => 'fail' );
+                throw new Exception( __( 'Invalid order. Please try again.', 'hcwc' ) );
             }
 
             // ** THE FIX **: Immediately set the correct title before any other processing.
@@ -851,14 +897,12 @@ add_action( 'plugins_loaded', function() {
             // Validate gateway configuration
             if ( empty( $this->secret_key ) ) {
                 $this->log( 'Gateway misconfiguration: Secret key missing', 'error' );
-                wc_add_notice( __( 'Payment gateway is not properly configured.', 'hcwc' ), 'error' );
-                return array( 'result' => 'fail' );
+                throw new Exception( __( 'Payment gateway is not properly configured.', 'hcwc' ) );
             }
 
             if ( empty( $this->vendor_id ) ) {
                 $this->log( 'Gateway misconfiguration: Vendor ID missing', 'error' );
-                wc_add_notice( __( 'Payment gateway is not properly configured.', 'hcwc' ), 'error' );
-                return array( 'result' => 'fail' );
+                throw new Exception( __( 'Payment gateway is not properly configured.', 'hcwc' ) );
             }
 
             // Build comprehensive lineItems from WC order including products, discounts, shipping, taxes
@@ -876,37 +920,51 @@ add_action( 'plugins_loaded', function() {
 
             $this->log( 'Generated URLs - Success: ' . $success . ', Return: ' . $return . ', Cancel: ' . $cancel );
 
-            $billing_phone = $order->get_billing_phone();
-            if ( ! $billing_phone ) {
-                $this->log( 'Payment failed: Missing billing phone for order #' . $order_id, 'error' );
-                throw new Exception( __( 'A phone number is required to complete checkout. Please add a billing phone number and try again.', 'hcwc' ) );
-            }
-
-            $customer_details = array();
+            // Hosted checkout needs the full billing contact to create the
+            // customer record. Validate the required fields up front so the
+            // shopper gets a precise message naming what's missing, instead of a
+            // generic failure after the API round-trip. Thrown as an Exception so
+            // it surfaces in both Classic and Blocks checkout.
             $billing_email = $order->get_billing_email();
             $billing_first = $order->get_billing_first_name();
             $billing_last  = $order->get_billing_last_name();
-            if ( $billing_email && $billing_first && $billing_last ) {
-                $customer_details = array(
-                    'firstName'   => $billing_first,
-                    'lastName'    => $billing_last,
-                    'email'       => $billing_email,
-                    'phoneNumber' => $billing_phone,
+            $billing_phone = $order->get_billing_phone();
+
+            $missing_fields = array();
+            if ( ! $billing_first ) { $missing_fields[] = __( 'first name', 'hcwc' ); }
+            if ( ! $billing_last )  { $missing_fields[] = __( 'last name', 'hcwc' ); }
+            if ( ! $billing_email ) { $missing_fields[] = __( 'email address', 'hcwc' ); }
+            if ( ! $billing_phone ) { $missing_fields[] = __( 'phone number', 'hcwc' ); }
+            if ( ! empty( $missing_fields ) ) {
+                $this->log( 'Payment failed: missing billing fields (' . implode( ', ', $missing_fields ) . ') for order #' . $order_id, 'error' );
+                throw new Exception( sprintf(
+                    /* translators: %s: comma-separated list of missing billing fields */
+                    __( 'Please add your %s to complete checkout.', 'hcwc' ),
+                    implode( ', ', $missing_fields )
+                ) );
+            }
+
+            // All required fields present — always send the full customer record
+            // (including phone) so a present phone is never silently dropped.
+            $customer_details = array(
+                'firstName'   => $billing_first,
+                'lastName'    => $billing_last,
+                'email'       => $billing_email,
+                'phoneNumber' => $billing_phone,
+            );
+            $billing_addr1 = $order->get_billing_address_1();
+            $billing_city  = $order->get_billing_city();
+            $billing_country = $order->get_billing_country();
+            $billing_zip   = $order->get_billing_postcode();
+            if ( $billing_addr1 && $billing_city && $billing_country && $billing_zip ) {
+                $customer_details['billingAddress'] = array(
+                    'line1'   => $billing_addr1,
+                    'line2'   => $order->get_billing_address_2(),
+                    'city'    => $billing_city,
+                    'region'  => $order->get_billing_state(),
+                    'country' => $billing_country,
+                    'zipcode' => $billing_zip,
                 );
-                $billing_addr1 = $order->get_billing_address_1();
-                $billing_city  = $order->get_billing_city();
-                $billing_country = $order->get_billing_country();
-                $billing_zip   = $order->get_billing_postcode();
-                if ( $billing_addr1 && $billing_city && $billing_country && $billing_zip ) {
-                    $customer_details['billingAddress'] = array(
-                        'line1'   => $billing_addr1,
-                        'line2'   => $order->get_billing_address_2(),
-                        'city'    => $billing_city,
-                        'region'  => $order->get_billing_state(),
-                        'country' => $billing_country,
-                        'zipcode' => $billing_zip,
-                    );
-                }
             }
 
             $payload = array(
@@ -953,8 +1011,7 @@ add_action( 'plugins_loaded', function() {
                 // Check if this session ID is already used by another order (extra safety check)
                 if ( $session_id && $this->is_session_id_used_by_another_order( $session_id, $order->get_id() ) ) {
                     $this->log( 'Session ID from API already used by another order: ' . $session_id, 'error' );
-                    wc_add_notice( __( 'Payment gateway error. Please try again.', 'hcwc' ), 'error' );
-                    return array( 'result' => 'fail' );
+                    throw new Exception( __( 'Payment gateway error. Please try again.', 'hcwc' ) );
                 }
                 
                 $order->update_meta_data( '_hcwc_request_id', $request_id );
@@ -979,8 +1036,13 @@ add_action( 'plugins_loaded', function() {
             );
             $this->log( 'Payment process failed - ' . wp_json_encode( $error_details ), 'error' );
 
-            wc_add_notice( 'Could not start ' . kc_get_brand_name() . ' checkout. Please try again.', 'error' );
-            return array( 'result' => 'fail' );
+            // The shopper-actionable validation (missing contact fields) already
+            // ran before the API call and surfaced a precise message. A failure
+            // here is a backend/config/limit condition whose message can be
+            // operator-facing or sensitive (e.g. merchant volume limits), so show
+            // a generic message — the real reason is logged above for support.
+            // Thrown so it displays in both Classic and Blocks checkout.
+            throw new Exception( sprintf( __( 'Could not start %s checkout. Please try again.', 'hcwc' ), kc_get_brand_name() ) );
         }
 
         /** Refund support */
@@ -1015,6 +1077,14 @@ add_action( 'plugins_loaded', function() {
             if ( $order->get_payment_method() !== $this->id ) {
                 $this->log( 'Refund validation failed: Order not paid with this gateway (method: ' . $order->get_payment_method() . ')', 'error' );
                 return new WP_Error( 'invalid_payment_gateway', 'Order was not paid with ' . kc_get_brand_name() );
+            }
+
+            // A confirmed cancel-void has already returned these funds at the
+            // processor, so no refund applies. The admin refund UI is hidden on
+            // cancelled orders; this guards the programmatic refund paths.
+            if ( $order->get_meta( '_hcwc_void_succeeded_at' ) ) {
+                $this->log( 'Refund blocked for order #' . $order_id . ': payment was already voided on cancel', 'error' );
+                return new WP_Error( 'already_voided', 'This payment was already voided when the order was cancelled; no refund applies.' );
             }
 
             // Check if gateway is properly configured
@@ -1127,6 +1197,118 @@ add_action( 'plugins_loaded', function() {
                 
                 return new WP_Error( 'refund_failed', 'Refund failed: ' . $error_msg );
             }
+        }
+
+        /**
+         * Void a still-pending ACH payment when an on-hold order is cancelled.
+         * Routes through request() so transport, throttling, headers, and the
+         * idempotency key are constructed in one place.
+         */
+        public function void_ach_on_cancel( $order_id, $order = null ) {
+            if ( ! $order instanceof WC_Order ) {
+                $order = wc_get_order( $order_id );
+                if ( ! $order ) { return; }
+            }
+            if ( $order->get_payment_method() !== $this->id ) { return; }
+
+            $payment_id = $order->get_meta( '_hcwc_payment_id' );
+            if ( ! $payment_id ) {
+                // Nothing was captured; cancellation needs no backend action.
+                return;
+            }
+
+            // The meta value is normally a MongoDB ObjectId; anything else means
+            // corrupted state and should not be acted on.
+            if ( ! preg_match( '/^[a-zA-Z0-9_-]+$/', $payment_id ) ) {
+                $this->log( 'Cancel-void: order #' . $order_id . ' invalid payment_id format, skipping', 'warning' );
+                return;
+            }
+
+            // Only attempt the void for non-terminal ACH states. If the bank has
+            // already cleared or returned the check, there is no in-flight ACH to
+            // cancel - the merchant should issue a normal refund instead.
+            $gateway_status = strtolower( (string) $order->get_meta( '_hcwc_gateway_status' ) );
+            if ( $gateway_status && ! in_array( $gateway_status, array( 'pending', 'action_required' ), true ) ) {
+                $this->log( 'Cancel-void: order #' . $order_id . ' skipped - gateway_status=' . $gateway_status . ' is past void window' );
+                return;
+            }
+
+            if ( $order->get_meta( '_hcwc_void_attempted' ) ) {
+                $this->log( 'Cancel-void: order #' . $order_id . ' already attempted, skipping' );
+                return;
+            }
+
+            if ( empty( $this->secret_key ) ) {
+                $this->log( 'Cancel-void: order #' . $order_id . ' no API key configured, skipping' );
+                return;
+            }
+
+            $order->update_meta_data( '_hcwc_void_attempted', gmdate( 'c' ) );
+            $order->save();
+
+            $amount  = number_format( (float) $order->get_total(), 2, '.', '' );
+            $payload = array(
+                'payment_id' => sanitize_text_field( $payment_id ),
+                'amount'     => $amount,
+                'reason'     => 'Order cancelled in WooCommerce',
+            );
+            $idk = 'cancel_' . $order_id . '_' . md5( $amount );
+
+            $res  = $this->request( 'POST', 'transactions/' . $payment_id . '/refund', $payload, $idk );
+            $code = isset( $res['code'] ) ? (int) $res['code'] : 0;
+            $body = isset( $res['body'] ) ? $res['body'] : null;
+
+            if ( $code === 429 ) {
+                // Throttled locally before the request reached the API: the void
+                // never ran. Clear the attempted marker so re-triggering the
+                // cancel transition can retry, and leave a note for the merchant.
+                $this->log( 'Cancel-void: order #' . $order_id . ' rate limited; manual processor portal action required', 'warning' );
+                $order->delete_meta_data( '_hcwc_void_attempted' );
+                $order->add_order_note( sprintf(
+                    '%s: ACH void on cancel was rate-limited and did not run. Re-cancel the order to retry, or verify in the eCheck processor portal that the payment was voided.',
+                    kc_get_brand_name()
+                ) );
+                $order->save();
+                return;
+            }
+
+            if ( $code >= 200 && $code < 300 ) {
+                $order->add_order_note( sprintf(
+                    '%s: pending ACH voided via processor cancel.',
+                    kc_get_brand_name()
+                ) );
+                $order->update_meta_data( '_hcwc_void_succeeded_at', gmdate( 'c' ) );
+                $order->save();
+                $this->log( 'Cancel-void: order #' . $order_id . ' voided successfully' );
+                return;
+            }
+
+            if ( $code === 0 ) {
+                // Transport error: the request did not get a response, so the void
+                // state is unknown. Clear the attempted marker so a re-cancel can
+                // retry rather than permanently skipping this order.
+                $this->log( 'Cancel-void: order #' . $order_id . ' transport error', 'warning' );
+                $order->delete_meta_data( '_hcwc_void_attempted' );
+                $order->add_order_note( sprintf(
+                    '%s: failed to void pending ACH on cancel (could not reach the payment API). Re-cancel the order to retry, or check the eCheck processor portal manually.',
+                    kc_get_brand_name()
+                ) );
+                $order->save();
+                return;
+            }
+
+            $body_msg = '';
+            if ( is_array( $body ) && isset( $body['message'] ) ) {
+                $body_msg = sanitize_text_field( $body['message'] );
+            }
+            $this->log( 'Cancel-void: order #' . $order_id . ' API ' . $code . ': ' . $body_msg, 'warning' );
+            $order->add_order_note( sprintf(
+                '%s: failed to void ACH on cancel (HTTP %d%s). Check the eCheck processor portal manually.',
+                kc_get_brand_name(),
+                $code,
+                $body_msg ? ' - ' . $body_msg : ''
+            ) );
+            $order->save();
         }
 
     // Webhook endpoint removed in simplified plugin
@@ -1247,8 +1429,8 @@ add_action( 'plugins_loaded', function() {
     }, 999, 2 ); // Very high priority
 
     /**
-     * GLOBAL HOOK: Ensure billing phone is required at checkout — hosted checkout
-     * needs it to skip the redundant billing-info step.
+     * GLOBAL HOOK: Ensure billing phone is required at Classic checkout — hosted
+     * checkout needs it to skip the redundant billing-info step.
      */
     add_filter( 'woocommerce_checkout_fields', function( $fields ) {
         if ( isset( $fields['billing']['billing_phone'] ) ) {
@@ -1256,6 +1438,26 @@ add_action( 'plugins_loaded', function() {
         }
         return $fields;
     }, 20 );
+
+    /**
+     * BLOCKS / STORE API: the woocommerce_checkout_fields filter above only
+     * affects Classic checkout, so enforce the phone requirement during Store
+     * API checkout too. Throwing here blocks submission with an inline message
+     * before any payment request is made.
+     */
+    add_action( 'woocommerce_store_api_checkout_update_order_from_request', function( $order, $request ) {
+        if ( ! $order instanceof WC_Order || $order->get_payment_method() !== 'hcwc' ) {
+            return;
+        }
+        if ( ! $order->get_billing_phone()
+            && class_exists( '\\Automattic\\WooCommerce\\StoreApi\\Exceptions\\RouteException' ) ) {
+            throw new \Automattic\WooCommerce\StoreApi\Exceptions\RouteException(
+                'hcwc_phone_required',
+                esc_html__( 'A phone number is required to complete checkout.', 'hcwc' ),
+                400
+            );
+        }
+    }, 10, 2 );
 
     /**
      * Add Settings link on Plugins page.
@@ -1325,34 +1527,11 @@ add_action( 'plugins_loaded', function() {
         }
     }, 5, 2 );
 
-    // One-time migration from legacy 'konacash' gateway ID to 'hcwc'
-    if ( ! get_option( 'hcwc_migrated_from_konacash' ) ) {
-        $old = get_option( 'woocommerce_konacash_settings', array() );
-        if ( ! empty( $old ) && empty( get_option( 'woocommerce_hcwc_settings', array() ) ) ) {
-            update_option( 'woocommerce_hcwc_settings', $old );
-        }
-        $old_hours = get_option( 'konacash_auto_sync_hours' );
-        if ( $old_hours !== false && get_option( 'hcwc_auto_sync_hours' ) === false ) {
-            update_option( 'hcwc_auto_sync_hours', $old_hours );
-        }
-        global $wpdb;
-        $wpdb->update( $wpdb->postmeta, array( 'meta_value' => 'hcwc' ), array( 'meta_key' => '_payment_method', 'meta_value' => 'konacash' ) );
-        if ( $wpdb->get_var( "SHOW TABLES LIKE '{$wpdb->prefix}wc_orders'" ) ) {
-            $wpdb->update( $wpdb->prefix . 'wc_orders', array( 'payment_method' => 'hcwc' ), array( 'payment_method' => 'konacash' ) );
-        }
-        update_option( 'hcwc_migrated_from_konacash', 1 );
-    }
 }, 1 );
 
 
 register_activation_hook( __FILE__, function() {
-    // Migrate settings from legacy plugin if upgrading
-    $old = get_option( 'woocommerce_konacash_settings', array() );
     $existing_settings = get_option( 'woocommerce_hcwc_settings', array() );
-    if ( ! empty( $old ) && empty( $existing_settings ) ) {
-        $existing_settings = $old;
-        update_option( 'woocommerce_hcwc_settings', $existing_settings );
-    }
     // Set default store domain if not already set
     if ( empty( $existing_settings['store_domain'] ) ) {
         $existing_settings['store_domain'] = untrailingslashit( home_url() );
@@ -1811,23 +1990,26 @@ if ( ! function_exists( 'hcwc_run_gateway_status_sweep' ) ) {
             return;
         }
 
+        // ACH returns can land well after the deposit (some return codes allow up
+        // to ~60 days), so look back 90 days. Include 'pending' as well as
+        // 'on-hold' so an ACH order that hasn't yet advanced is still reconciled.
         $orders = wc_get_orders( array(
-            'limit'          => 50,
-            'status'         => array( 'on-hold' ),
+            'limit'          => 100,
+            'status'         => array( 'on-hold', 'pending' ),
             'payment_method' => 'hcwc',
             'meta_query'     => array(
                 array( 'key' => '_hcwc_payment_id', 'compare' => 'EXISTS' ),
             ),
-            'date_created'   => '>' . gmdate( 'Y-m-d H:i:s', time() - ( 30 * DAY_IN_SECONDS ) ),
+            'date_created'   => '>' . gmdate( 'Y-m-d H:i:s', time() - ( 90 * DAY_IN_SECONDS ) ),
             'return'         => 'objects',
         ) );
 
         if ( empty( $orders ) ) {
-            hcwc_log( 'Gateway sweep: no on-hold orders to check' );
+            hcwc_log( 'Gateway sweep: no on-hold/pending orders to check' );
             return;
         }
 
-        hcwc_log( 'Gateway sweep: checking ' . count( $orders ) . ' on-hold order(s)' );
+        hcwc_log( 'Gateway sweep: checking ' . count( $orders ) . ' order(s)' );
 
         $api_base = kc_get_api_url();
         foreach ( $orders as $order ) {
@@ -1934,11 +2116,14 @@ if ( ! function_exists( 'hcwc_apply_gateway_status_to_order' ) ) {
 }
 
 /**
- * Apply the gateway's transient-based rate limit to standalone HTTP calls
+ * Apply the gateway's transient-based throttle to standalone HTTP calls
  * (auto-sync and sweep) that don't go through WC_Gateway_HCWC::request().
  * Same window (60s) and threshold (100 req/min) as the class method.
  *
- * Returns true if the request may proceed; false if rate-limited.
+ * Best-effort only: the authoritative cap is enforced server-side, so this
+ * does not need to be exact under concurrency.
+ *
+ * Returns true if the request may proceed; false if throttled.
  */
 if ( ! function_exists( 'hcwc_check_rate_limit' ) ) {
     function hcwc_check_rate_limit( $api_key ) {
@@ -2035,118 +2220,12 @@ if ( ! function_exists( 'hcwc_sync_gateway_status_for_order' ) ) {
 add_action( 'woocommerce_order_status_on-hold_to_cancelled', 'hcwc_void_ach_on_cancel', 10, 2 );
 
 if ( ! function_exists( 'hcwc_void_ach_on_cancel' ) ) {
-    function hcwc_void_ach_on_cancel( $order_id, $order ) {
-        if ( ! $order instanceof WC_Order ) {
-            $order = wc_get_order( $order_id );
-            if ( ! $order ) { return; }
-        }
-        if ( $order->get_payment_method() !== 'hcwc' ) { return; }
-
-        $payment_id = $order->get_meta( '_hcwc_payment_id' );
-        if ( ! $payment_id ) {
-            // Nothing was captured; cancellation needs no backend action.
-            return;
-        }
-
-        // The meta value is normally a MongoDB ObjectId; anything else means
-        // corrupted state and should not be acted on.
-        if ( ! preg_match( '/^[a-zA-Z0-9_-]+$/', $payment_id ) ) {
-            hcwc_log( 'Cancel-void: order #' . $order_id . ' invalid payment_id format, skipping', 'warning' );
-            return;
-        }
-
-        // Only attempt the void for non-terminal ACH states. If the bank has
-        // already cleared or returned the check, there is no in-flight ACH
-        // to cancel - the merchant should issue a normal refund instead.
-        $gateway_status = strtolower( (string) $order->get_meta( '_hcwc_gateway_status' ) );
-        if ( $gateway_status && ! in_array( $gateway_status, array( 'pending', 'action_required' ), true ) ) {
-            hcwc_log( 'Cancel-void: order #' . $order_id . ' skipped - gateway_status=' . $gateway_status . ' is past void window' );
-            return;
-        }
-
-        if ( $order->get_meta( '_hcwc_void_attempted' ) ) {
-            hcwc_log( 'Cancel-void: order #' . $order_id . ' already attempted, skipping' );
-            return;
-        }
-
-        $settings = get_option( 'woocommerce_hcwc_settings', array() );
-        $api_key  = isset( $settings['secret_key'] ) ? $settings['secret_key'] : '';
-        if ( ! $api_key ) {
-            hcwc_log( 'Cancel-void: order #' . $order_id . ' no API key configured, skipping' );
-            return;
-        }
-
-        if ( ! hcwc_check_rate_limit( $api_key ) ) {
-            // The hook only fires on the on-hold -> cancelled transition, which
-            // already happened. There is no automatic retry path. Leave a note
-            // so the merchant knows to check the processor portal manually.
-            hcwc_log( 'Cancel-void: order #' . $order_id . ' rate limited; manual processor portal action required', 'warning' );
-            $order->add_order_note( sprintf(
-                '%s: ACH void on cancel was rate-limited and did not run. Verify in the eCheck processor portal that the payment was voided.',
-                kc_get_brand_name()
-            ) );
-            $order->save();
-            return;
-        }
-
-        $order->update_meta_data( '_hcwc_void_attempted', gmdate( 'c' ) );
-        $order->save();
-
-        $payload = array(
-            'payment_id' => sanitize_text_field( $payment_id ),
-            'amount'     => number_format( (float) $order->get_total(), 2, '.', '' ),
-            'reason'     => 'Order cancelled in WooCommerce',
-        );
-        $idk = 'cancel_' . $order_id . '_' . md5( number_format( (float) $order->get_total(), 2, '.', '' ) );
-
-        $url = trailingslashit( kc_get_api_url() ) . 'transactions/' . rawurlencode( $payment_id ) . '/refund';
-        $resp = wp_remote_post( $url, array(
-            'headers' => array(
-                'Content-Type'    => 'application/json',
-                'X-API-KEY'       => $api_key,
-                'Idempotency-Key' => $idk,
-                'User-Agent'      => kc_get_brand_name() . '-WooCommerce/' . KC_WC_VERSION,
-            ),
-            'timeout' => 30,
-            'body'    => wp_json_encode( $payload ),
-        ) );
-
-        if ( is_wp_error( $resp ) ) {
-            $msg = $resp->get_error_message();
-            hcwc_log( 'Cancel-void: order #' . $order_id . ' API error: ' . $msg, 'warning' );
-            $order->add_order_note( sprintf(
-                '%s: failed to void pending ACH on cancel (%s). Check the eCheck processor portal manually.',
-                kc_get_brand_name(),
-                sanitize_text_field( $msg )
-            ) );
-            $order->save();
-            return;
-        }
-
-        $code = wp_remote_retrieve_response_code( $resp );
-        if ( $code >= 200 && $code < 300 ) {
-            $order->add_order_note( sprintf(
-                '%s: pending ACH voided via processor cancel.',
-                kc_get_brand_name()
-            ) );
-            $order->update_meta_data( '_hcwc_void_succeeded_at', gmdate( 'c' ) );
-            $order->save();
-            hcwc_log( 'Cancel-void: order #' . $order_id . ' voided successfully' );
-        } else {
-            $body = wp_remote_retrieve_body( $resp );
-            $body_msg = '';
-            $decoded = json_decode( $body, true );
-            if ( is_array( $decoded ) && isset( $decoded['message'] ) ) {
-                $body_msg = sanitize_text_field( $decoded['message'] );
-            }
-            hcwc_log( 'Cancel-void: order #' . $order_id . ' API ' . $code . ': ' . $body_msg, 'warning' );
-            $order->add_order_note( sprintf(
-                '%s: failed to void ACH on cancel (HTTP %d%s). Check the eCheck processor portal manually.',
-                kc_get_brand_name(),
-                $code,
-                $body_msg ? ' - ' . $body_msg : ''
-            ) );
-            $order->save();
-        }
+    function hcwc_void_ach_on_cancel( $order_id, $order = null ) {
+        if ( ! class_exists( 'WC_Gateway_HCWC' ) ) { return; }
+        $gateways = ( function_exists( 'WC' ) && WC()->payment_gateways() )
+            ? WC()->payment_gateways()->payment_gateways()
+            : array();
+        $gateway = isset( $gateways['hcwc'] ) ? $gateways['hcwc'] : new WC_Gateway_HCWC();
+        $gateway->void_ach_on_cancel( $order_id, $order );
     }
 }
