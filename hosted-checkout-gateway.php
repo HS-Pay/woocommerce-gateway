@@ -85,7 +85,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.11
+ * Version:     1.8.12
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -97,7 +97,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.11' );
+define( 'KC_WC_VERSION', '1.8.12' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -641,10 +641,20 @@ add_action( 'plugins_loaded', function() {
                         hcwc_apply_gateway_status_to_order( $order, $gateway_status, is_array( $txn ) ? $txn : array(), $txn_id ?: '', 'capture-return' );
                         return;
                     }
-                    // Card path - no gatewayStatus on response, complete normally.
-                    $this->log( 'Payment successful - Completing order' );
-                    $order->payment_complete( $txn_id ?: '' );
-                    $order->add_order_note( kc_get_brand_name() . ': paid (verified via session).' );
+                    // No gatewayStatus: complete only for a genuine card payment.
+                    // An eCheck/ACH method or a missing transaction must be held,
+                    // never shipped (it has not cleared).
+                    if ( hcwc_should_card_complete( $txn, $txn_id ) ) {
+                        $this->log( 'Payment successful - Completing order' );
+                        $order->payment_complete( $txn_id );
+                        $order->add_order_note( kc_get_brand_name() . ': paid (verified via session).' );
+                        $order->save();
+                        return;
+                    }
+                    $this->log( 'Paid but no card signal / no transaction - holding order', 'warning' );
+                    if ( ! $order->has_status( array( 'on-hold', 'processing', 'completed', 'failed', 'refunded', 'cancelled' ) ) ) {
+                        $order->update_status( 'on-hold', kc_get_brand_name() . ': payment received, awaiting confirmation. Do not ship until status updates.' );
+                    }
                     $order->save();
                     return;
                 } else if ( in_array( $status, array( 'failed', 'cancelled', 'expired' ), true ) ) {
@@ -763,10 +773,15 @@ add_action( 'plugins_loaded', function() {
                     $order->save();
                 } elseif ( $gateway_status ) {
                     hcwc_apply_gateway_status_to_order( $order, $gateway_status, is_array( $tx ) ? $tx : array(), $txn_id ?: '', 'manual-sync' );
-                } else {
+                } elseif ( hcwc_should_card_complete( $tx, $txn_id ) ) {
                     $this->log( 'Payment confirmed - Completing order with status: ' . $status );
-                    $order->payment_complete( $txn_id ?: '' );
+                    $order->payment_complete( $txn_id );
                     $order->add_order_note( kc_get_brand_name() . ': synced → marked paid.' );
+                } else {
+                    $this->log( 'Synced paid but no card signal / no transaction - holding order', 'warning' );
+                    if ( ! $order->has_status( array( 'on-hold', 'processing', 'completed', 'failed', 'refunded', 'cancelled' ) ) ) {
+                        $order->update_status( 'on-hold', kc_get_brand_name() . ': payment received, awaiting confirmation. Do not ship until status updates.' );
+                    }
                 }
             } else {
                 $this->log( 'Payment status: ' . ( $status ?: 'none' ) . ', Order status: ' . $order->get_status() );
@@ -1887,11 +1902,13 @@ if ( ! function_exists( 'hcwc_auto_sync_single_order' ) ) {
                 $gateway_status = isset( $txn['gatewayStatus'] ) ? strtolower( $txn['gatewayStatus'] ) : null;
                 if ( $gateway_status ) {
                     hcwc_apply_gateway_status_to_order( $order, $gateway_status, is_array( $txn ) ? $txn : array(), $txn_id, 'auto-sync' );
-                } else {
+                } elseif ( hcwc_should_card_complete( $txn, $txn_id ) ) {
                     if ( ! $order->is_paid() ) {
                         $order->payment_complete( $txn_id );
                     }
                     hcwc_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' -> marked paid (card path).' );
+                } else {
+                    hcwc_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' paid but no card signal - leaving for sweep.', 'warning' );
                 }
             } else {
                 hcwc_log( 'Auto-sync: order #' . $order->get_id() . ' session ' . $session_id . ' shows paid status but no transaction ID - keeping pending until transaction appears.' );
@@ -2026,16 +2043,22 @@ if ( ! function_exists( 'hcwc_run_gateway_status_sweep' ) ) {
         // 'pending' forever despite a real debit. Resolve them by session so a
         // paid-but-unreturned order is never stranded. Reuses the same
         // session -> payment_id -> status path as the admin-screen auto-sync.
+        // Bounded window + newest-first: a paid-but-unreturned order resolves on
+        // the first poll, so 14 days is ample to catch it; this keeps abandoned
+        // (never-paid) orders from being re-polled indefinitely and from crowding
+        // out genuinely recent ones.
         $session_only = wc_get_orders( array(
             'limit'          => 100,
             'status'         => array( 'pending', 'on-hold' ),
             'payment_method' => 'hcwc',
+            'orderby'        => 'date',
+            'order'          => 'DESC',
             'meta_query'     => array(
                 'relation' => 'AND',
                 array( 'key' => '_hcwc_payment_id', 'compare' => 'NOT EXISTS' ),
                 array( 'key' => '_hcwc_session_id', 'compare' => 'EXISTS' ),
             ),
-            'date_created'   => '>' . gmdate( 'Y-m-d H:i:s', time() - ( 90 * DAY_IN_SECONDS ) ),
+            'date_created'   => '>' . gmdate( 'Y-m-d H:i:s', time() - ( 14 * DAY_IN_SECONDS ) ),
             'return'         => 'objects',
         ) );
 
@@ -2052,6 +2075,24 @@ if ( ! function_exists( 'hcwc_run_gateway_status_sweep' ) ) {
         if ( empty( $orders ) && empty( $session_only ) ) {
             hcwc_log( 'Gateway sweep: no on-hold/pending orders to check' );
         }
+    }
+}
+
+if ( ! function_exists( 'hcwc_should_card_complete' ) ) {
+    /**
+     * Positive signal that an order may be completed immediately as a card
+     * payment. True only when a transaction id is recorded AND the method is not
+     * a bank/eCheck. eCheck/ACH must never take this fast path - it has to wait
+     * for gatewayStatus 'cleared'. A missing transaction (e.g. settlement failed
+     * after the session was marked paid) or a bank method without a gatewayStatus
+     * is ambiguous and must be held, never shipped.
+     */
+    function hcwc_should_card_complete( $txn, $txn_id ) {
+        if ( empty( $txn_id ) ) {
+            return false;
+        }
+        $type = isset( $txn['paymentMethod']['type'] ) ? strtolower( (string) $txn['paymentMethod']['type'] ) : '';
+        return $type !== 'bank';
     }
 }
 
