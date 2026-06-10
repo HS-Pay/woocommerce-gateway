@@ -85,7 +85,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.10
+ * Version:     1.8.11
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -97,7 +97,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.10' );
+define( 'KC_WC_VERSION', '1.8.11' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -2010,16 +2010,47 @@ if ( ! function_exists( 'hcwc_run_gateway_status_sweep' ) ) {
             'return'         => 'objects',
         ) );
 
-        if ( empty( $orders ) ) {
-            hcwc_log( 'Gateway sweep: no on-hold/pending orders to check' );
-            return;
+        $api_base = kc_get_api_url();
+
+        if ( ! empty( $orders ) ) {
+            hcwc_log( 'Gateway sweep: checking ' . count( $orders ) . ' order(s)' );
+            foreach ( $orders as $order ) {
+                hcwc_sync_gateway_status_for_order( $order, $api_base, $api_key );
+            }
         }
 
-        hcwc_log( 'Gateway sweep: checking ' . count( $orders ) . ' order(s)' );
+        // Second pass: orders that never received a transaction id - e.g. the
+        // shopper completed the eCheck on the hosted page but never returned to
+        // the thank-you page. They carry a session id but no _hcwc_payment_id, so
+        // the transaction-based pass above cannot see them and they would sit in
+        // 'pending' forever despite a real debit. Resolve them by session so a
+        // paid-but-unreturned order is never stranded. Reuses the same
+        // session -> payment_id -> status path as the admin-screen auto-sync.
+        $session_only = wc_get_orders( array(
+            'limit'          => 100,
+            'status'         => array( 'pending', 'on-hold' ),
+            'payment_method' => 'hcwc',
+            'meta_query'     => array(
+                'relation' => 'AND',
+                array( 'key' => '_hcwc_payment_id', 'compare' => 'NOT EXISTS' ),
+                array( 'key' => '_hcwc_session_id', 'compare' => 'EXISTS' ),
+            ),
+            'date_created'   => '>' . gmdate( 'Y-m-d H:i:s', time() - ( 90 * DAY_IN_SECONDS ) ),
+            'return'         => 'objects',
+        ) );
 
-        $api_base = kc_get_api_url();
-        foreach ( $orders as $order ) {
-            hcwc_sync_gateway_status_for_order( $order, $api_base, $api_key );
+        if ( ! empty( $session_only ) ) {
+            hcwc_log( 'Gateway sweep: resolving ' . count( $session_only ) . ' session-only order(s) without a transaction id' );
+            foreach ( $session_only as $order ) {
+                $session_id = $order->get_meta( '_hcwc_session_id' );
+                if ( $session_id ) {
+                    hcwc_auto_sync_single_order( $order, $session_id );
+                }
+            }
+        }
+
+        if ( empty( $orders ) && empty( $session_only ) ) {
+            hcwc_log( 'Gateway sweep: no on-hold/pending orders to check' );
         }
     }
 }
@@ -2034,8 +2065,8 @@ if ( ! function_exists( 'hcwc_run_gateway_status_sweep' ) ) {
  *
  * Status mapping:
  *   cleared                                  -> payment_complete (processing/completed)
- *   action_required | returned | cancelled   -> failed (with reject reason if known)
- *   pending (or any other state)             -> on-hold
+ *   returned | cancelled                     -> failed (terminal; with reject reason if known)
+ *   action_required | pending (or unknown)   -> on-hold (non-terminal; still recoverable/pollable)
  *
  * Tracking meta written every call:
  *   _hcwc_gateway_status
@@ -2073,26 +2104,40 @@ if ( ! function_exists( 'hcwc_apply_gateway_status_to_order' ) ) {
                 $order->add_order_note( $note );
                 $changed = true;
             }
-        } elseif ( in_array( $gateway_status, array( 'returned', 'action_required', 'cancelled' ), true ) ) {
+        } elseif ( $gateway_status === 'action_required' ) {
+            // NOT terminal: the check can still be resolved (e.g. the merchant
+            // overrides a verification warning in the eCheck processor portal) and
+            // later clear. Hold the order - and keep it pollable by the sweep -
+            // instead of failing it, so a subsequent 'cleared' can still advance it.
+            // Mapping this to 'failed' would lock the order out of recovery (the
+            // cleared branch and the sweep both skip failed orders), stranding a
+            // paid, cleared order as failed.
+            if ( ! $order->has_status( array( 'on-hold', 'processing', 'completed', 'failed', 'refunded', 'cancelled' ) ) ) {
+                $reason = ! empty( $tx['gatewayVerifyDescription'] ) ? sanitize_text_field( $tx['gatewayVerifyDescription'] ) : '';
+                $parts = array_filter( array(
+                    sprintf( '%s: payment needs attention before it can clear.', kc_get_brand_name() ),
+                    $reason ? 'Reason: ' . $reason : '',
+                    'Next step: log into your eCheck processor portal to review and resolve, or contact the customer for a different payment method. Do not ship until the payment clears.',
+                ) );
+                $order->update_status( 'on-hold', implode( ' ', $parts ) );
+                $order->update_meta_data( '_hcwc_gateway_set_wc_status', 'on-hold' );
+                $changed = true;
+            }
+        } elseif ( in_array( $gateway_status, array( 'returned', 'cancelled' ), true ) ) {
+            // Terminal failures: the bank returned the debit (NSF) or it was voided
+            // in the processor portal. Neither can recover.
             if ( ! $order->has_status( array( 'failed', 'refunded', 'cancelled' ) ) ) {
                 $reason = '';
                 if ( $gateway_status === 'returned' && ! empty( $tx['gatewayRejectReason'] ) ) {
                     $reason = sanitize_text_field( $tx['gatewayRejectReason'] );
-                } elseif ( $gateway_status === 'action_required' && ! empty( $tx['gatewayVerifyDescription'] ) ) {
-                    $reason = sanitize_text_field( $tx['gatewayVerifyDescription'] );
                 }
-                $remediation = '';
-                if ( $gateway_status === 'action_required' ) {
-                    $remediation = 'Log into your eCheck processor portal to review and resolve, or contact the customer for a different payment method.';
-                } elseif ( $gateway_status === 'returned' ) {
-                    $remediation = 'The customer\'s bank returned the payment. Contact the customer for a different payment method.';
-                } elseif ( $gateway_status === 'cancelled' ) {
-                    $remediation = 'This payment was voided in the eCheck processor portal.';
-                }
+                $remediation = $gateway_status === 'returned'
+                    ? 'The customer\'s bank returned the payment. Contact the customer for a different payment method.'
+                    : 'This payment was voided in the eCheck processor portal.';
                 $parts = array_filter( array(
                     sprintf( '%s: payment %s.', kc_get_brand_name(), str_replace( '_', ' ', $gateway_status ) ),
                     $reason ? 'Reason: ' . $reason : '',
-                    $remediation ? 'Next step: ' . $remediation : '',
+                    'Next step: ' . $remediation,
                 ) );
                 $order->update_status( 'failed', implode( ' ', $parts ) );
                 $order->update_meta_data( '_hcwc_gateway_set_wc_status', 'failed' );
