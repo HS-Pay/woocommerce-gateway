@@ -85,7 +85,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.12
+ * Version:     1.8.13
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -97,7 +97,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.12' );
+define( 'KC_WC_VERSION', '1.8.13' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -2321,3 +2321,201 @@ if ( ! function_exists( 'hcwc_void_ach_on_cancel' ) ) {
         $gateway->void_ach_on_cancel( $order_id, $order );
     }
 }
+
+/**
+ * Orders-list gateway-status column + filter.
+ *
+ * The plugin maps several distinct gatewayStatus values onto the same WC
+ * 'on-hold' status: 'pending' (normal - ACH still clearing, no issue) and
+ * 'action_required' (an issue the merchant must resolve) both land on-hold, so
+ * they are indistinguishable in the Orders list without opening each order and
+ * reading the private note. This surfaces _hcwc_gateway_status directly on the
+ * list with a colored badge (issues in red) plus a filter dropdown, so a busy
+ * merchant can spot - and isolate - orders that need attention at a glance.
+ *
+ * Supports both the classic posts-table orders screen and the HPOS orders
+ * screen. Read-only: it never changes order state, only display + filtering.
+ */
+if ( ! function_exists( 'hcwc_gateway_status_keys' ) ) {
+    /** Canonical, filterable gatewayStatus values. */
+    function hcwc_gateway_status_keys() {
+        return array( 'action_required', 'pending', 'cleared', 'returned', 'cancelled' );
+    }
+}
+
+if ( ! function_exists( 'hcwc_gateway_status_label' ) ) {
+    /** Merchant-facing label for a gatewayStatus value. */
+    function hcwc_gateway_status_label( $status ) {
+        $labels = array(
+            'action_required' => __( 'Needs attention', 'hcwc' ),
+            'pending'         => __( 'Awaiting clearance', 'hcwc' ),
+            'cleared'         => __( 'Cleared', 'hcwc' ),
+            'returned'        => __( 'Returned', 'hcwc' ),
+            'cancelled'       => __( 'Voided', 'hcwc' ),
+        );
+        return isset( $labels[ $status ] ) ? $labels[ $status ] : '';
+    }
+}
+
+if ( ! function_exists( 'hcwc_gateway_status_colors' ) ) {
+    /** [foreground, background] for a gatewayStatus badge. */
+    function hcwc_gateway_status_colors( $status ) {
+        $colors = array(
+            'action_required' => array( '#8a1c1c', '#fbe3e3' ),
+            'pending'         => array( '#8a6100', '#fcf3d9' ),
+            'cleared'         => array( '#1c6b2e', '#e3f4e6' ),
+            'returned'        => array( '#5f1a1a', '#efd6d6' ),
+            'cancelled'       => array( '#555555', '#e7e7e7' ),
+        );
+        return isset( $colors[ $status ] ) ? $colors[ $status ] : array( '#555555', '#e7e7e7' );
+    }
+}
+
+if ( ! function_exists( 'hcwc_render_gateway_status_badge' ) ) {
+    /**
+     * Echo the gatewayStatus badge for an order. Renders nothing for non-hcwc
+     * orders; an em dash for hcwc orders with no gatewayStatus yet (e.g. a card
+     * order, or an eCheck not yet polled). $order may be a WC_Order or an id.
+     */
+    function hcwc_render_gateway_status_badge( $order ) {
+        if ( ! $order instanceof WC_Order ) {
+            $order = wc_get_order( $order );
+        }
+        if ( ! $order || $order->get_payment_method() !== 'hcwc' ) {
+            return;
+        }
+        $status = strtolower( (string) $order->get_meta( '_hcwc_gateway_status' ) );
+        $label  = $status ? hcwc_gateway_status_label( $status ) : '';
+        if ( '' === $label ) {
+            echo '<span aria-hidden="true">&mdash;</span>';
+            return;
+        }
+        list( $fg, $bg ) = hcwc_gateway_status_colors( $status );
+        $prefix = ( 'action_required' === $status ) ? "\xE2\x9A\xA0\xEF\xB8\x8F " : '';
+        printf(
+            '<span style="display:inline-block;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:600;line-height:1.7;white-space:nowrap;color:%1$s;background:%2$s;" title="%3$s">%4$s%5$s</span>',
+            esc_attr( $fg ),
+            esc_attr( $bg ),
+            esc_attr( sprintf( '%s payment status: %s', kc_get_brand_name(), hcwc_gateway_status_label( $status ) ) ),
+            esc_html( $prefix ),
+            esc_html( $label )
+        );
+    }
+}
+
+if ( ! function_exists( 'hcwc_add_gateway_status_column' ) ) {
+    /** Insert the gateway-status column immediately after the WC status column. */
+    function hcwc_add_gateway_status_column( $columns ) {
+        if ( ! is_array( $columns ) ) {
+            return $columns;
+        }
+        $header = esc_html( kc_get_brand_name() . ' status' );
+        $new    = array();
+        foreach ( $columns as $key => $label ) {
+            $new[ $key ] = $label;
+            if ( 'order_status' === $key ) {
+                $new['hcwc_gateway_status'] = $header;
+            }
+        }
+        if ( ! isset( $new['hcwc_gateway_status'] ) ) {
+            $new['hcwc_gateway_status'] = $header;
+        }
+        return $new;
+    }
+}
+// HPOS orders screen + classic posts-table screen.
+add_filter( 'manage_woocommerce_page_wc-orders_columns', 'hcwc_add_gateway_status_column', 20 );
+add_filter( 'manage_edit-shop_order_columns', 'hcwc_add_gateway_status_column', 20 );
+
+// HPOS column render: action passes ( $column_name, $order ).
+add_action( 'woocommerce_shop_order_list_table_custom_column', function( $column, $order ) {
+    if ( 'hcwc_gateway_status' === $column ) {
+        hcwc_render_gateway_status_badge( $order );
+    }
+}, 10, 2 );
+// Classic column render: action passes ( $column_name, $post_id ).
+add_action( 'manage_shop_order_posts_custom_column', function( $column, $post_id ) {
+    if ( 'hcwc_gateway_status' === $column ) {
+        hcwc_render_gateway_status_badge( $post_id );
+    }
+}, 10, 2 );
+
+if ( ! function_exists( 'hcwc_render_gateway_status_filter' ) ) {
+    /** Render the "filter by gateway status" dropdown on the Orders toolbar. */
+    function hcwc_render_gateway_status_filter() {
+        // Read-only list filter via GET (consistent with WooCommerce's own
+        // status/customer filters); no state change, so no nonce required.
+        $current = isset( $_GET['hcwc_gateway_status'] ) ? sanitize_text_field( wp_unslash( $_GET['hcwc_gateway_status'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+        echo '<select name="hcwc_gateway_status" id="hcwc_gateway_status_filter">';
+        echo '<option value="">' . esc_html( sprintf( '%s status: all', kc_get_brand_name() ) ) . '</option>';
+        foreach ( hcwc_gateway_status_keys() as $val ) {
+            printf(
+                '<option value="%s"%s>%s</option>',
+                esc_attr( $val ),
+                selected( $current, $val, false ),
+                esc_html( hcwc_gateway_status_label( $val ) )
+            );
+        }
+        echo '</select>';
+    }
+}
+// HPOS toolbar: action passes ( $order_type, $which ).
+add_action( 'woocommerce_order_list_table_restrict_manage_orders', function( $order_type ) {
+    if ( 'shop_order' === $order_type ) {
+        hcwc_render_gateway_status_filter();
+    }
+}, 20 );
+// Classic toolbar.
+add_action( 'restrict_manage_posts', function( $post_type = '' ) {
+    $type = $post_type ?: ( isset( $GLOBALS['typenow'] ) ? $GLOBALS['typenow'] : '' );
+    if ( 'shop_order' === $type ) {
+        hcwc_render_gateway_status_filter();
+    }
+}, 20 );
+
+// HPOS query: filter the order list by the selected gatewayStatus meta.
+add_filter( 'woocommerce_order_list_table_prepare_items_query_args', function( $args ) {
+    if ( empty( $_GET['hcwc_gateway_status'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+        return $args;
+    }
+    $val = sanitize_text_field( wp_unslash( $_GET['hcwc_gateway_status'] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+    if ( ! in_array( $val, hcwc_gateway_status_keys(), true ) ) {
+        return $args;
+    }
+    if ( empty( $args['meta_query'] ) || ! is_array( $args['meta_query'] ) ) {
+        $args['meta_query'] = array();
+    }
+    $args['meta_query'][] = array(
+        'key'     => '_hcwc_gateway_status',
+        'value'   => $val,
+        'compare' => '=',
+    );
+    return $args;
+} );
+// Classic query: same filter via the main orders query.
+add_action( 'pre_get_posts', function( $query ) {
+    if ( ! is_admin() || ! $query instanceof WP_Query || ! $query->is_main_query() ) {
+        return;
+    }
+    if ( empty( $_GET['hcwc_gateway_status'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+        return;
+    }
+    $screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+    if ( ! $screen || 'edit-shop_order' !== $screen->id ) {
+        return;
+    }
+    $val = sanitize_text_field( wp_unslash( $_GET['hcwc_gateway_status'] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+    if ( ! in_array( $val, hcwc_gateway_status_keys(), true ) ) {
+        return;
+    }
+    $meta_query = $query->get( 'meta_query' );
+    if ( ! is_array( $meta_query ) ) {
+        $meta_query = array();
+    }
+    $meta_query[] = array(
+        'key'     => '_hcwc_gateway_status',
+        'value'   => $val,
+        'compare' => '=',
+    );
+    $query->set( 'meta_query', $meta_query );
+} );

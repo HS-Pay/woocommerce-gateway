@@ -3,7 +3,7 @@ Contributors: your-company
 Tags: payments, checkout, woocommerce, hosted-checkout, blocks, refunds
 Requires at least: 6.0
 Tested up to: 6.6
-Stable tag: 1.6.5
+Stable tag: 1.8.13
 License: GPL-3.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -57,6 +57,11 @@ In WordPress (https://yoursite/wp-admin):
 - Save changes to enable the gateway
 
 == Changelog ==
+
+= 1.8.13 =
+* **NEW**: Orders list now shows a per-order payment-status badge (e.g. "Needs attention", "Awaiting clearance", "Cleared", "Returned", "Voided") so merchants can spot eCheck orders that need action without opening each one - "Awaiting clearance" and "Needs attention" otherwise both appear as plain On-hold orders
+* **NEW**: Orders toolbar filter to show only orders in a given payment status (e.g. just the ones that need attention)
+* Works on both the classic and High-Performance Order Storage (HPOS) order screens; display only, no change to payment, refund, or sync behavior
 
 = 1.6.5 =
 * **FIX**: Removed misleading placeholder on the API Domain field (merchants were mistaking the placeholder for an entered value and saving with the field blank, silently hiding the gateway at checkout)
