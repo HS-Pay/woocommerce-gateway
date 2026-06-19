@@ -85,7 +85,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.13
+ * Version:     1.8.14
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -97,7 +97,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.13' );
+define( 'KC_WC_VERSION', '1.8.14' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -2139,9 +2139,7 @@ if ( ! function_exists( 'hcwc_apply_gateway_status_to_order' ) ) {
             if ( ! $order->is_paid() && ! $order->has_status( array( 'refunded', 'cancelled', 'failed' ) ) ) {
                 $order->payment_complete( $txn_id );
                 $order->update_meta_data( '_hcwc_gateway_set_wc_status', $order->get_status() );
-                $note = $context === 'sweep'
-                    ? sprintf( '%s: bank verified payment - moved from on-hold to processing.', kc_get_brand_name() )
-                    : sprintf( '%s: paid (verified via session).', kc_get_brand_name() );
+                $note = sprintf( '%s: Check issued to your bank. eCheck payments are not guaranteed and can be returned for weeks after deposit — do not treat as final. Do not ship until you are comfortable with the return risk.', kc_get_brand_name() );
                 $order->add_order_note( $note );
                 $changed = true;
             }
@@ -2349,7 +2347,7 @@ if ( ! function_exists( 'hcwc_gateway_status_label' ) ) {
         $labels = array(
             'action_required' => __( 'Needs attention', 'hcwc' ),
             'pending'         => __( 'Awaiting clearance', 'hcwc' ),
-            'cleared'         => __( 'Cleared', 'hcwc' ),
+            'cleared'         => __( 'Check Issued', 'hcwc' ),
             'returned'        => __( 'Returned', 'hcwc' ),
             'cancelled'       => __( 'Voided', 'hcwc' ),
         );
@@ -2363,7 +2361,7 @@ if ( ! function_exists( 'hcwc_gateway_status_colors' ) ) {
         $colors = array(
             'action_required' => array( '#8a1c1c', '#fbe3e3' ),
             'pending'         => array( '#8a6100', '#fcf3d9' ),
-            'cleared'         => array( '#1c6b2e', '#e3f4e6' ),
+            'cleared'         => array( '#8a6100', '#fcf3d9' ),
             'returned'        => array( '#5f1a1a', '#efd6d6' ),
             'cancelled'       => array( '#555555', '#e7e7e7' ),
         );
