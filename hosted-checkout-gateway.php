@@ -85,7 +85,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.14
+ * Version:     1.8.15
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -97,7 +97,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.14' );
+define( 'KC_WC_VERSION', '1.8.15' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -2139,7 +2139,7 @@ if ( ! function_exists( 'hcwc_apply_gateway_status_to_order' ) ) {
             if ( ! $order->is_paid() && ! $order->has_status( array( 'refunded', 'cancelled', 'failed' ) ) ) {
                 $order->payment_complete( $txn_id );
                 $order->update_meta_data( '_hcwc_gateway_set_wc_status', $order->get_status() );
-                $note = sprintf( '%s: Check issued to your bank. eCheck payments are not guaranteed and can be returned for weeks after deposit — do not treat as final. Do not ship until you are comfortable with the return risk.', kc_get_brand_name() );
+                $note = sprintf( '%s: Check successfully issued to your bank for deposit. eCheck payments are not guaranteed. A bank can return a check for weeks after it is deposited. Confirm the funds have cleared your bank account before you ship.', kc_get_brand_name() );
                 $order->add_order_note( $note );
                 $changed = true;
             }
