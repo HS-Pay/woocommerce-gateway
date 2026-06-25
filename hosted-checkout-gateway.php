@@ -85,7 +85,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.15
+ * Version:     1.8.16
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -97,7 +97,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.15' );
+define( 'KC_WC_VERSION', '1.8.16' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -622,6 +622,9 @@ add_action( 'plugins_loaded', function() {
                 }
 
                 if ( in_array( $status, array( 'paid', 'succeeded' ), true ) ) {
+                    // Reflect the platform's session fee(s) (e.g. Vendor Transaction Fee) on the
+                    // order so its total equals the charged amount before we verify.
+                    hcwc_apply_session_fee_to_order( $order, $sess );
                     // Verify processor amount matches the order total before any capture.
                     if ( ! hcwc_amount_matches_order( $order, is_array( $txn ) ? $txn : array() ) ) {
                         $api_amount = isset( $txn['amount'] ) ? $txn['amount'] : '';
@@ -763,6 +766,7 @@ add_action( 'plugins_loaded', function() {
             $status = strtolower( $session['paymentStatus'] ?? '' );
             $gateway_status = isset( $tx['gatewayStatus'] ) ? strtolower( $tx['gatewayStatus'] ) : null;
             if ( in_array($status, array('paid','succeeded'), true) && ! $order->has_status(array('processing','completed')) ) {
+                hcwc_apply_session_fee_to_order( $order, $session );
                 if ( ! hcwc_amount_matches_order( $order, is_array( $tx ) ? $tx : array() ) ) {
                     $api_amount = isset( $tx['amount'] ) ? $tx['amount'] : '';
                     $this->log( 'Manual sync: capture blocked - amount mismatch (order=' . $order->get_total() . ', api=' . $api_amount . ')', 'error' );
@@ -1886,6 +1890,7 @@ if ( ! function_exists( 'hcwc_auto_sync_single_order' ) ) {
 
         if ( in_array( $status, array( 'paid','succeeded' ), true ) ) {
             if ( $txn_id ) {
+                hcwc_apply_session_fee_to_order( $order, $sess );
                 if ( ! hcwc_amount_matches_order( $order, is_array( $txn ) ? $txn : array() ) ) {
                     $api_amount = isset( $txn['amount'] ) ? $txn['amount'] : '';
                     hcwc_log( 'Auto-sync: capture blocked - amount mismatch (order=' . $order->get_total() . ', api=' . $api_amount . ')', 'error' );
@@ -2244,6 +2249,49 @@ if ( ! function_exists( 'hcwc_amount_matches_order' ) ) {
             return true;
         }
         return abs( floatval( $tx['amount'] ) - floatval( $order->get_total() ) ) <= 0.01;
+    }
+}
+
+if ( ! function_exists( 'hcwc_apply_session_fee_to_order' ) ) {
+    /**
+     * Mirror the checkout session's fee adjustments (e.g. a "Vendor Transaction
+     * Fee") onto the WooCommerce order as fee line items, so the WC order total
+     * equals the amount actually charged. The platform adds these fees to the
+     * session total; without reflecting them the bare order total is lower than
+     * the charged amount, which made the amount-verification check below flag a
+     * false mismatch and "block" the capture. Idempotent via _hcwc_fee_applied.
+     */
+    function hcwc_apply_session_fee_to_order( WC_Order $order, $sess ) {
+        if ( 'yes' === $order->get_meta( '_hcwc_fee_applied' ) ) {
+            return;
+        }
+        if ( ! is_array( $sess ) || empty( $sess['adjustments'] ) || ! is_array( $sess['adjustments'] ) ) {
+            return;
+        }
+        $applied = false;
+        foreach ( $sess['adjustments'] as $adj ) {
+            if ( ! is_array( $adj ) || ! isset( $adj['value'] ) || ! is_numeric( $adj['value'] ) ) {
+                continue;
+            }
+            $value = round( (float) $adj['value'], 2 );
+            if ( $value <= 0 ) {
+                continue;
+            }
+            $signed = ( isset( $adj['type'] ) && 'subtract' === $adj['type'] ) ? -$value : $value;
+            $name   = ! empty( $adj['name'] ) ? sanitize_text_field( $adj['name'] ) : 'Fee';
+            $fee = new WC_Order_Item_Fee();
+            $fee->set_name( $name );
+            $fee->set_total( (string) $signed );
+            $fee->set_tax_status( 'none' );
+            $order->add_item( $fee );
+            $applied = true;
+        }
+        if ( $applied ) {
+            $order->calculate_totals( false );
+            $order->update_meta_data( '_hcwc_fee_applied', 'yes' );
+            $order->save();
+            hcwc_log( 'Applied session fee adjustment(s) to order #' . $order->get_id() . ' — order total now ' . $order->get_total() );
+        }
     }
 }
 
