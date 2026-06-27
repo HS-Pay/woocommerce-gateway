@@ -3,7 +3,7 @@ Contributors: your-company
 Tags: payments, checkout, woocommerce, hosted-checkout, blocks, refunds
 Requires at least: 6.0
 Tested up to: 6.6
-Stable tag: 1.8.13
+Stable tag: 1.8.17
 License: GPL-3.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -57,6 +57,10 @@ In WordPress (https://yoursite/wp-admin):
 - Save changes to enable the gateway
 
 == Changelog ==
+
+= 1.8.17 =
+* **NEW**: Returned eCheck payments now update orders that already advanced to Processing (Processing -> Failed) within the bank return window, so a check that clears and is later returned by the bank no longer shows "Processing" indefinitely
+* **IMPROVEMENT**: Reduced the background payment-status sweep frequency (eCheck status changes at most a couple times per day), cutting redundant API calls; immediate post-checkout status polling is unchanged
 
 = 1.8.13 =
 * **NEW**: Orders list now shows a per-order payment-status badge (e.g. "Needs attention", "Awaiting clearance", "Cleared", "Returned", "Voided") so merchants can spot eCheck orders that need action without opening each one - "Awaiting clearance" and "Needs attention" otherwise both appear as plain On-hold orders

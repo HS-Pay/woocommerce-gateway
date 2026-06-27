@@ -85,7 +85,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.16
+ * Version:     1.8.17
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -97,7 +97,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.16' );
+define( 'KC_WC_VERSION', '1.8.17' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -1984,28 +1984,42 @@ if ( ! function_exists( 'hcwc_log' ) ) {
 }
 
 /**
- * Phase 2A: Recurring gateway-status sweep for on-hold ACH orders.
+ * Phase 2A: Recurring gateway-status sweep for ACH orders.
  *
- * Runs every 15 minutes via Action Scheduler. For each on-hold order
- * with a stored transaction id, fetches the latest gatewayStatus from
- * the platform-api and advances the order:
- *   cleared                                        -> payment_complete (processing)
- *   action_required | returned | cancelled         -> failed (with reject reason)
- *   pending                                        -> leave on-hold
- *
- * Targets only orders created within the last 30 days to bound the scan.
+ * Runs every few hours via Action Scheduler. eCheck status only changes when the
+ * processor posts a batch (~2x/day) and the platform reconciliation runs just after,
+ * so 15-minute polling mostly re-fetched unchanged status and hammered the API. The
+ * sweep:
+ *   - advances on-hold/pending orders (cleared -> processing, returned/cancelled -> failed)
+ *   - re-checks 'processing' eCheck orders within the ACH return window so a later
+ *     platform-side 'returned' propagates (processing -> failed) — otherwise an
+ *     early-issued order shows "processing (ship it)" forever after a bounce
+ *   - resolves paid-but-unreturned (session-only) orders
+ * Immediate post-checkout polling is unchanged (it resolves the just-paid case fast).
  */
 if ( ! function_exists( 'hcwc_register_gateway_status_sweep' ) ) {
     function hcwc_register_gateway_status_sweep() {
         if ( ! function_exists( 'as_next_scheduled_action' ) || ! function_exists( 'as_schedule_recurring_action' ) ) {
             return;
         }
-        if ( false === as_next_scheduled_action( 'hcwc_gateway_status_sweep' ) ) {
-            as_schedule_recurring_action( time() + 60, 15 * MINUTE_IN_SECONDS, 'hcwc_gateway_status_sweep', array(), 'hcwc' );
+        $interval = 4 * HOUR_IN_SECONDS;
+        // Reschedule when the interval changes (existing installs already have the old
+        // 15-min action; the bare as_next_scheduled_action guard would never update it).
+        $scheduled = as_next_scheduled_action( 'hcwc_gateway_status_sweep' );
+        $stored    = (int) get_option( 'hcwc_sweep_interval', 0 );
+        if ( false === $scheduled || $stored !== $interval ) {
+            if ( function_exists( 'as_unschedule_all_actions' ) ) {
+                as_unschedule_all_actions( 'hcwc_gateway_status_sweep' );
+            }
+            as_schedule_recurring_action( time() + 60, $interval, 'hcwc_gateway_status_sweep', array(), 'hcwc' );
+            update_option( 'hcwc_sweep_interval', $interval );
         }
     }
 }
-add_action( 'plugins_loaded', 'hcwc_register_gateway_status_sweep', 20 );
+// Register on 'init' (not plugins_loaded): Action Scheduler's data store isn't ready
+// until init, so scheduling earlier silently no-ops. Idempotent — only reschedules when
+// the interval actually changes.
+add_action( 'init', 'hcwc_register_gateway_status_sweep', 20 );
 
 add_action( 'hcwc_gateway_status_sweep', 'hcwc_run_gateway_status_sweep' );
 
@@ -2077,8 +2091,38 @@ if ( ! function_exists( 'hcwc_run_gateway_status_sweep' ) ) {
             }
         }
 
-        if ( empty( $orders ) && empty( $session_only ) ) {
-            hcwc_log( 'Gateway sweep: no on-hold/pending orders to check' );
+        // Third pass: eCheck orders already advanced to 'processing' (cleared) but still
+        // within the ACH return window. Re-check so a platform-side 'returned' propagates
+        // (processing -> failed) — without this an early-issued order that later bounces
+        // stays 'processing' (ship it) forever. Kept separate from pass 1 so a flood of
+        // processing orders can't starve on-hold/pending advancement. Oldest-first so
+        // orders nearing the end of the return window are checked before they age out.
+        // hcwc_sync_gateway_status_for_order bails on terminal states and respects
+        // merchant overrides, so re-applying 'cleared' to a paid order is a no-op.
+        $processing = wc_get_orders( array(
+            'limit'          => 100,
+            'status'         => array( 'processing' ),
+            'payment_method' => 'hcwc',
+            'orderby'        => 'date',
+            'order'          => 'ASC',
+            'meta_query'     => array(
+                'relation' => 'AND',
+                array( 'key' => '_hcwc_payment_id', 'compare' => 'EXISTS' ),
+                array( 'key' => '_hcwc_gateway_status', 'value' => 'cleared', 'compare' => '=' ),
+            ),
+            'date_created'   => '>' . gmdate( 'Y-m-d H:i:s', time() - ( 90 * DAY_IN_SECONDS ) ),
+            'return'         => 'objects',
+        ) );
+
+        if ( ! empty( $processing ) ) {
+            hcwc_log( 'Gateway sweep: re-checking ' . count( $processing ) . ' processing eCheck order(s) for returns' );
+            foreach ( $processing as $order ) {
+                hcwc_sync_gateway_status_for_order( $order, $api_base, $api_key );
+            }
+        }
+
+        if ( empty( $orders ) && empty( $session_only ) && empty( $processing ) ) {
+            hcwc_log( 'Gateway sweep: no orders to check' );
         }
     }
 }
