@@ -28,6 +28,23 @@ if ( ! function_exists( 'kc_get_brand_logo' ) ) {
         return ! empty( $cached['logo'] ) ? $cached['logo'] : '';
     }
 }
+if ( ! function_exists( 'kc_normalize_us_phone' ) ) {
+    /**
+     * Normalize a phone number to the NNN-NNN-NNNN format the platform/Green Money
+     * require. Strips non-digits, drops a leading US country code, and returns the
+     * formatted 10-digit string, or '' if it is not a valid 10-digit US number.
+     */
+    function kc_normalize_us_phone( $raw ) {
+        $digits = preg_replace( '/\D/', '', (string) $raw );
+        if ( strlen( $digits ) === 11 && $digits[0] === '1' ) {
+            $digits = substr( $digits, 1 );
+        }
+        if ( strlen( $digits ) !== 10 ) {
+            return '';
+        }
+        return substr( $digits, 0, 3 ) . '-' . substr( $digits, 3, 3 ) . '-' . substr( $digits, 6 );
+    }
+}
 if ( ! function_exists( 'kc_normalize_api_domain' ) ) {
     /**
      * Reduce a user-entered API domain to a bare host (with optional :port).
@@ -85,7 +102,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.17
+ * Version:     1.8.18
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -97,7 +114,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.17' );
+define( 'KC_WC_VERSION', '1.8.18' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -969,6 +986,14 @@ add_action( 'plugins_loaded', function() {
                 ) );
             }
 
+            // Normalize the phone to NNN-NNN-NNNN so a valid-but-differently-formatted
+            // number (spaces, parens, dashes, leading country code) isn't rejected later.
+            $billing_phone = kc_normalize_us_phone( $billing_phone );
+            if ( ! $billing_phone ) {
+                $this->log( 'Payment failed: invalid phone number for order #' . $order_id, 'error' );
+                throw new Exception( __( 'Please enter a valid 10-digit US phone number to complete checkout.', 'hcwc' ) );
+            }
+
             // All required fields present — always send the full customer record
             // (including phone) so a present phone is never silently dropped.
             $customer_details = array(
@@ -1508,6 +1533,22 @@ add_action( 'plugins_loaded', function() {
             wp_localize_script( 'hcwc-redirect-fallback', 'kcGatewayData', array(
                 'brandName' => kc_get_brand_name(),
             ) );
+        }
+    } );
+
+    /**
+     * Enqueue the phone-required label script on checkout so the billing phone
+     * field reads as required (not "(optional)") when our gateway is available.
+     */
+    add_action( 'wp_enqueue_scripts', function() {
+        if ( is_checkout() && ! is_wc_endpoint_url( 'order-received' ) ) {
+            wp_enqueue_script(
+                'hcwc-phone-required',
+                KC_WC_PLUGIN_URL . 'assets/js/hcwc-phone-required.js',
+                array(),
+                KC_WC_VERSION,
+                true
+            );
         }
     } );
 

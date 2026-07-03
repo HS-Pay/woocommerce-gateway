@@ -3,7 +3,7 @@ Contributors: your-company
 Tags: payments, checkout, woocommerce, hosted-checkout, blocks, refunds
 Requires at least: 6.0
 Tested up to: 6.6
-Stable tag: 1.8.17
+Stable tag: 1.8.18
 License: GPL-3.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -57,6 +57,10 @@ In WordPress (https://yoursite/wp-admin):
 - Save changes to enable the gateway
 
 == Changelog ==
+
+= 1.8.18 =
+* **FIX**: The billing phone is normalized to the required NNN-NNN-NNNN format before checkout, so a valid number entered with spaces, parentheses, dashes, or a leading country code is accepted instead of being rejected by the payment processor
+* **IMPROVEMENT**: The billing phone field now reads as required (no longer "(optional)") when this gateway is available at checkout
 
 = 1.8.17 =
 * **NEW**: Returned eCheck payments now update orders that already advanced to Processing (Processing -> Failed) within the bank return window, so a check that clears and is later returned by the bank no longer shows "Processing" indefinitely
