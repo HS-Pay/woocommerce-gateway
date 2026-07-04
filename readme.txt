@@ -3,7 +3,7 @@ Contributors: your-company
 Tags: payments, checkout, woocommerce, hosted-checkout, blocks, refunds
 Requires at least: 6.0
 Tested up to: 6.6
-Stable tag: 1.8.18
+Stable tag: 1.8.19
 License: GPL-3.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -57,6 +57,9 @@ In WordPress (https://yoursite/wp-admin):
 - Save changes to enable the gateway
 
 == Changelog ==
+
+= 1.8.19 =
+* **FIX**: Resolved a checkout freeze (blank payment/order-summary blocks, spinning tab) caused by the phone-required label script triggering an infinite DOM-mutation loop; the label update is now idempotent
 
 = 1.8.18 =
 * **FIX**: The billing phone is normalized to the required NNN-NNN-NNNN format before checkout, so a valid number entered with spaces, parentheses, dashes, or a leading country code is accepted instead of being rejected by the payment processor
