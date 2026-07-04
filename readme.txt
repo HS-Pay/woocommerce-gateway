@@ -3,7 +3,7 @@ Contributors: your-company
 Tags: payments, checkout, woocommerce, hosted-checkout, blocks, refunds
 Requires at least: 6.0
 Tested up to: 6.6
-Stable tag: 1.8.19
+Stable tag: 1.8.20
 License: GPL-3.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -57,6 +57,9 @@ In WordPress (https://yoursite/wp-admin):
 - Save changes to enable the gateway
 
 == Changelog ==
+
+= 1.8.20 =
+* **IMPROVEMENT**: Removed the red outline on the required phone field; removing "(optional)" is enough to signal it's required, and the field now matches the other required fields
 
 = 1.8.19 =
 * **FIX**: Resolved a checkout freeze (blank payment/order-summary blocks, spinning tab) caused by the phone-required label script triggering an infinite DOM-mutation loop; the label update is now idempotent

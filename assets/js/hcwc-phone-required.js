@@ -75,12 +75,6 @@
     }
 
     function init() {
-        const style = document.createElement('style');
-        style.textContent =
-            '.hcwc-phone-required.wc-block-components-text-input { outline: 2px solid #cc1818; border-radius: 4px; }' +
-            '.hcwc-phone-required input { border-color: #cc1818 !important; }';
-        document.head.appendChild(style);
-
         update();
 
         const observer = new MutationObserver(update);
