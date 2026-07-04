@@ -46,7 +46,9 @@
 
             if (label) {
                 if (isOurs) {
-                    if (!label.dataset.hcwcOriginal) {
+                    // === undefined (not truthiness) so an empty-string original still latches
+                    // and this capture write runs at most once, or it re-arms the observer loop.
+                    if (label.dataset.hcwcOriginal === undefined) {
                         label.dataset.hcwcOriginal = label.textContent;
                     }
                     setText(label, label.dataset.hcwcOriginal.replace(/\s*\(optional\)/i, ''));
@@ -57,7 +59,7 @@
 
             if (input) {
                 if (isOurs) {
-                    if (!input.dataset.hcwcOriginalAria) {
+                    if (input.dataset.hcwcOriginalAria === undefined) {
                         input.dataset.hcwcOriginalAria = input.getAttribute('aria-label') || '';
                     }
                     setAria(input, (input.dataset.hcwcOriginalAria || '').replace(/\s*\(optional\)/i, ''));
