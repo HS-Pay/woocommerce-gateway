@@ -3,7 +3,7 @@ Contributors: your-company
 Tags: payments, checkout, woocommerce, hosted-checkout, blocks, refunds
 Requires at least: 6.0
 Tested up to: 6.6
-Stable tag: 1.8.21
+Stable tag: 1.8.22
 License: GPL-3.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -57,6 +57,9 @@ In WordPress (https://yoursite/wp-admin):
 - Save changes to enable the gateway
 
 == Changelog ==
+
+= 1.8.22 =
+* **NEW**: Failed payment attempts on the hosted checkout are now recorded as order notes with the gateway's failure reason and time, so merchants can see why a pending order hasn't been paid
 
 = 1.8.21 =
 * **FIX**: Fully close the checkout-freeze loop — the phone label's original-value capture now runs once even when the captured value is empty, so it can no longer re-trigger the DOM observer
