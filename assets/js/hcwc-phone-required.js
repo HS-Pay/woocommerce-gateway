@@ -16,6 +16,27 @@
         return active ? active.value : '';
     }
 
+    // Only write when the value actually changes. Writing unconditionally (especially
+    // textContent, which rebuilds the text node every time) retriggers the MutationObserver
+    // below and creates an infinite update loop that hangs the checkout.
+    function setText(el, value) {
+        if (el && el.textContent !== value) el.textContent = value;
+    }
+
+    function setAria(el, value) {
+        if (el && (el.getAttribute('aria-label') || '') !== value) el.setAttribute('aria-label', value);
+    }
+
+    // classList.add/remove still emit a class-attribute mutation even when the token is
+    // already in the desired state, so guard these too or the observer loops.
+    function addClass(el, name) {
+        if (el && !el.classList.contains(name)) el.classList.add(name);
+    }
+
+    function removeClass(el, name) {
+        if (el && el.classList.contains(name)) el.classList.remove(name);
+    }
+
     function update() {
         const isOurs = getSelectedGateway() === GATEWAY;
 
@@ -25,41 +46,37 @@
 
             if (label) {
                 if (isOurs) {
-                    if (!label.dataset.hcwcOriginal) {
+                    // === undefined (not truthiness) so an empty-string original still latches
+                    // and this capture write runs at most once, or it re-arms the observer loop.
+                    if (label.dataset.hcwcOriginal === undefined) {
                         label.dataset.hcwcOriginal = label.textContent;
                     }
-                    label.textContent = label.dataset.hcwcOriginal.replace(/\s*\(optional\)/i, '');
+                    setText(label, label.dataset.hcwcOriginal.replace(/\s*\(optional\)/i, ''));
                 } else if (label.dataset.hcwcOriginal) {
-                    label.textContent = label.dataset.hcwcOriginal;
+                    setText(label, label.dataset.hcwcOriginal);
                 }
             }
 
             if (input) {
                 if (isOurs) {
-                    if (!input.dataset.hcwcOriginalAria) {
+                    if (input.dataset.hcwcOriginalAria === undefined) {
                         input.dataset.hcwcOriginalAria = input.getAttribute('aria-label') || '';
                     }
-                    input.setAttribute('aria-label', (input.dataset.hcwcOriginalAria || '').replace(/\s*\(optional\)/i, ''));
+                    setAria(input, (input.dataset.hcwcOriginalAria || '').replace(/\s*\(optional\)/i, ''));
                 } else if (input.dataset.hcwcOriginalAria) {
-                    input.setAttribute('aria-label', input.dataset.hcwcOriginalAria);
+                    setAria(input, input.dataset.hcwcOriginalAria);
                 }
             }
 
             if (isOurs) {
-                wrapper.classList.add('hcwc-phone-required');
+                addClass(wrapper, 'hcwc-phone-required');
             } else {
-                wrapper.classList.remove('hcwc-phone-required');
+                removeClass(wrapper, 'hcwc-phone-required');
             }
         });
     }
 
     function init() {
-        const style = document.createElement('style');
-        style.textContent =
-            '.hcwc-phone-required.wc-block-components-text-input { outline: 2px solid #cc1818; border-radius: 4px; }' +
-            '.hcwc-phone-required input { border-color: #cc1818 !important; }';
-        document.head.appendChild(style);
-
         update();
 
         const observer = new MutationObserver(update);

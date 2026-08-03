@@ -28,6 +28,23 @@ if ( ! function_exists( 'kc_get_brand_logo' ) ) {
         return ! empty( $cached['logo'] ) ? $cached['logo'] : '';
     }
 }
+if ( ! function_exists( 'kc_normalize_us_phone' ) ) {
+    /**
+     * Normalize a phone number to the NNN-NNN-NNNN format the platform/Green Money
+     * require. Strips non-digits, drops a leading US country code, and returns the
+     * formatted 10-digit string, or '' if it is not a valid 10-digit US number.
+     */
+    function kc_normalize_us_phone( $raw ) {
+        $digits = preg_replace( '/\D/', '', (string) $raw );
+        if ( strlen( $digits ) === 11 && $digits[0] === '1' ) {
+            $digits = substr( $digits, 1 );
+        }
+        if ( strlen( $digits ) !== 10 ) {
+            return '';
+        }
+        return substr( $digits, 0, 3 ) . '-' . substr( $digits, 3, 3 ) . '-' . substr( $digits, 6 );
+    }
+}
 if ( ! function_exists( 'kc_normalize_api_domain' ) ) {
     /**
      * Reduce a user-entered API domain to a bare host (with optional :port).
@@ -85,7 +102,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
  * Description: Hosted checkout gateway for WooCommerce with refunds, Blocks support, and easy settings. Brand auto-detected from API.
  * Author:      HS-Pay
  * Author URI:  https://github.com/HS-Pay
- * Version:     1.8.17
+ * Version:     1.8.22
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * WC requires at least: 7.0
@@ -97,7 +114,7 @@ if ( ! function_exists( 'kc_get_api_url' ) ) {
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'KC_WC_VERSION', '1.8.17' );
+define( 'KC_WC_VERSION', '1.8.22' );
 define( 'KC_WC_PLUGIN_FILE', __FILE__ );
 define( 'KC_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'KC_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -606,6 +623,8 @@ add_action( 'plugins_loaded', function() {
 
                 $this->log( 'Polling result - Status: ' . ( $status ?: 'none' ) . ', Transaction ID: ' . ( $txn_id ?: 'none' ) . ', Amount: ' . ( $amount_i !== null ? $amount_i : 'none' ) );
 
+                hcwc_maybe_note_payment_failure( $order, $sess );
+
                 if ( $txn_id ) {
                     $order->update_meta_data( '_hcwc_payment_id', sanitize_text_field( $txn_id ) );
                     if ( $last4 && preg_match( '/^\d{4}$/', $last4 ) ) {   
@@ -735,6 +754,8 @@ add_action( 'plugins_loaded', function() {
                 $tx      = $r['body']['data']['transaction'] ?? array();
                 
                 $this->log( 'Session data retrieved - Status: ' . ( $session['paymentStatus'] ?? 'none' ) . ', Has transaction: ' . ( ! empty( $tx ) ? 'yes' : 'no' ) );
+
+                hcwc_maybe_note_payment_failure( $order, $session );
             }
 
             // 3) If no tx yet, try by stored payment_id or by listing transaction directly
@@ -967,6 +988,14 @@ add_action( 'plugins_loaded', function() {
                     __( 'Please add your %s to complete checkout.', 'hcwc' ),
                     implode( ', ', $missing_fields )
                 ) );
+            }
+
+            // Normalize the phone to NNN-NNN-NNNN so a valid-but-differently-formatted
+            // number (spaces, parens, dashes, leading country code) isn't rejected later.
+            $billing_phone = kc_normalize_us_phone( $billing_phone );
+            if ( ! $billing_phone ) {
+                $this->log( 'Payment failed: invalid phone number for order #' . $order_id, 'error' );
+                throw new Exception( __( 'Please enter a valid 10-digit US phone number to complete checkout.', 'hcwc' ) );
             }
 
             // All required fields present — always send the full customer record
@@ -1511,6 +1540,22 @@ add_action( 'plugins_loaded', function() {
         }
     } );
 
+    /**
+     * Enqueue the phone-required label script on checkout so the billing phone
+     * field reads as required (not "(optional)") when our gateway is available.
+     */
+    add_action( 'wp_enqueue_scripts', function() {
+        if ( is_checkout() && ! is_wc_endpoint_url( 'order-received' ) ) {
+            wp_enqueue_script(
+                'hcwc-phone-required',
+                KC_WC_PLUGIN_URL . 'assets/js/hcwc-phone-required.js',
+                array(),
+                KC_WC_VERSION,
+                true
+            );
+        }
+    } );
+
     /** WooCommerce Blocks registration (simple; server-side processing handles the charge) */
     add_action( 'woocommerce_blocks_loaded', function() {
         // Static flag to prevent duplicate registration
@@ -1888,6 +1933,8 @@ if ( ! function_exists( 'hcwc_auto_sync_single_order' ) ) {
 
         hcwc_log( 'Auto-sync: API response - Status: ' . ( $status ?: 'none' ) . ', Transaction ID: ' . ( $txn_id ?: 'none' ) );
 
+        hcwc_maybe_note_payment_failure( $order, $sess );
+
         if ( in_array( $status, array( 'paid','succeeded' ), true ) ) {
             if ( $txn_id ) {
                 hcwc_apply_session_fee_to_order( $order, $sess );
@@ -2251,6 +2298,53 @@ if ( ! function_exists( 'hcwc_apply_gateway_status_to_order' ) ) {
         }
 
         return $changed;
+    }
+}
+
+/**
+ * Record the checkout session's most recent payment failure (lastFailure) as
+ * an order note, once per distinct failure. Shared by the capture-return
+ * polling, manual sync, and the session-based auto-sync/sweep so every
+ * session touchpoint surfaces the same failure detail without duplicating
+ * notes: _hcwc_last_failure_at stores the timestamp of the last failure
+ * noted, and only a strictly newer failure is recorded (missing/unparsable
+ * meta counts as older). Notes only - never changes order status.
+ *
+ * The failure message comes from the API response and is normalized via
+ * sanitize_text_field() and capped at 300 chars before being written.
+ */
+if ( ! function_exists( 'hcwc_maybe_note_payment_failure' ) ) {
+    function hcwc_maybe_note_payment_failure( WC_Order $order, $sess ) {
+        if ( $order->is_paid() ) {
+            return;
+        }
+        if ( ! is_array( $sess ) || empty( $sess['lastFailure'] ) || ! is_array( $sess['lastFailure'] ) ) {
+            return;
+        }
+        $failure = $sess['lastFailure'];
+        $at      = isset( $failure['at'] ) ? sanitize_text_field( (string) $failure['at'] ) : '';
+        $at_ts   = $at ? strtotime( $at ) : false;
+        if ( false === $at_ts ) {
+            return;
+        }
+        $seen    = $order->get_meta( '_hcwc_last_failure_at' );
+        $seen_ts = $seen ? strtotime( $seen ) : false;
+        if ( false !== $seen_ts && $at_ts <= $seen_ts ) {
+            return;
+        }
+        $message = isset( $failure['message'] ) ? sanitize_text_field( (string) $failure['message'] ) : '';
+        if ( '' === $message ) {
+            $stage   = isset( $failure['stage'] ) ? strtolower( sanitize_text_field( (string) $failure['stage'] ) ) : '';
+            $message = ( 'bank-link' === $stage ) ? 'bank linking step failed' : 'no reason provided';
+        }
+        if ( mb_strlen( $message ) > 300 ) {
+            $message = mb_substr( $message, 0, 300 );
+        }
+        $when = wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $at_ts );
+        $order->add_order_note( kc_get_brand_name() . ': payment attempt failed — ' . $message . ' (' . $when . ')' );
+        $order->update_meta_data( '_hcwc_last_failure_at', $at );
+        $order->save();
+        hcwc_log( 'Payment failure noted on order #' . $order->get_id() . ' (failed at ' . $at . ')' );
     }
 }
 
